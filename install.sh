@@ -553,7 +553,7 @@ unlock_menu() {
     printf "%b\n" "$(color 36 "======================================")"
     printf "%b\n" "$(color 36 "           部署解锁机")"
     printf "%b\n" "$(color 36 "======================================")"
-    printf "  %b 安装/更新环境\n" "$(color 32 "1.")"
+    printf "  %b 安装\n" "$(color 32 "1.")"
     printf "  %b 运行状态检测\n" "$(color 32 "2.")"
     printf "  %b 域名池管理\n" "$(color 32 "3.")"
     printf "  %b 白名单管理\n" "$(color 32 "4.")"
