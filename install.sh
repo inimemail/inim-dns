@@ -133,6 +133,7 @@ load_node_whitelist() {
 
 save_node_whitelist() {
   : > "$NODE_WHITELIST_FILE"
+  local ip
   for ip in "${NODE_WHITELIST_IPS[@]}"; do printf '%s\n' "$ip" >> "$NODE_WHITELIST_FILE"; done
 }
 
@@ -142,7 +143,10 @@ sync_firewall_whitelist() {
   local ip
   if [ "$FIREWALL_BACKEND" = "nftables" ]; then
     nft flush set inet ai_unlock node_whitelist 2>/dev/null || true
-    for ip in "${NODE_WHITELIST_IPS[@]}"; do validate_ipv4 "$ip" || continue; nft add element inet ai_unlock node_whitelist "{ $ip }" 2>/dev/null || true; done
+    for ip in "${NODE_WHITELIST_IPS[@]}"; do
+      validate_ipv4 "$ip" || continue
+      nft add element inet ai_unlock node_whitelist "{ $ip }" 2>/dev/null || true
+    done
     ok "nftables 白名单已同步。"
     return 0
   fi
@@ -153,7 +157,8 @@ sync_firewall_whitelist() {
       iptables -A "$FIREWALL_CHAIN" -p udp --dport 53 -s "$ip" -j ACCEPT 2>/dev/null || true
       iptables -A "$FIREWALL_CHAIN" -p tcp --dport 53 -s "$ip" -j ACCEPT 2>/dev/null || true
     done
-    iptables -A "$FIREWALL_CHAIN" -p udp --dport 53 -j DROP 2>/dev/null || true; iptables -A "$FIREWALL_CHAIN" -p tcp --dport 53 -j DROP 2>/dev/null || true
+    iptables -A "$FIREWALL_CHAIN" -p udp --dport 53 -j DROP 2>/dev/null || true
+    iptables -A "$FIREWALL_CHAIN" -p tcp --dport 53 -j DROP 2>/dev/null || true
     ok "iptables 白名单已同步。"
     return 0
   fi
@@ -177,18 +182,25 @@ elif command -v iptables >/dev/null 2>&1 && iptables -nL "$FIREWALL_CHAIN" >/dev
 fi
 EOF
   chmod +x "$SYNC_SCRIPT"
+
   cat > "$SYSTEMD_SERVICE" <<EOF
 [Unit]
 Description=AI Unlock DNS Firewall Sync
 After=network.target iptables.service nftables.service firewalld.service ufw.service
+
 [Service]
 Type=oneshot
 ExecStart=/bin/bash $SYNC_SCRIPT
 RemainAfterExit=true
+
 [Install]
 WantedBy=multi-user.target
 EOF
-  if command_exists systemctl; then systemctl daemon-reload; systemctl enable ai-unlock-firewall.service >/dev/null 2>&1; fi
+
+  if command_exists systemctl; then
+    systemctl daemon-reload
+    systemctl enable ai-unlock-firewall.service >/dev/null 2>&1
+  fi
 }
 
 remove_firewall_rules() {
@@ -198,7 +210,8 @@ remove_firewall_rules() {
   elif [ "$FIREWALL_BACKEND" = "iptables" ]; then
     while iptables -D INPUT -p udp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null; do :; done
     while iptables -D INPUT -p tcp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null; do :; done
-    iptables -F "$FIREWALL_CHAIN" 2>/dev/null || true; iptables -X "$FIREWALL_CHAIN" 2>/dev/null || true
+    iptables -F "$FIREWALL_CHAIN" 2>/dev/null || true
+    iptables -X "$FIREWALL_CHAIN" 2>/dev/null || true
   fi
 }
 
@@ -207,7 +220,8 @@ list_firewall_whitelist() {
   load_node_whitelist
   printf "防火墙后端: %s\n" "$FIREWALL_BACKEND"
   if [ "${#NODE_WHITELIST_IPS[@]}" -eq 0 ]; then printf "  暂无节点 IP\n"; else
-    local i=1; for ip in "${NODE_WHITELIST_IPS[@]}"; do printf "  [%b] %s\n" "$(color 33 "$i")" "$ip"; ((i++)); done
+    local i=1
+    for ip in "${NODE_WHITELIST_IPS[@]}"; do printf "  [%b] %s\n" "$(color 33 "$i")" "$ip"; ((i++)); done
   fi
 }
 
@@ -216,7 +230,9 @@ firewall_add_ip() {
   if ! validate_ipv4 "$ip"; then warn "IP 格式不正确。"; return; fi
   load_node_whitelist
   for item in "${NODE_WHITELIST_IPS[@]}"; do if [ "$item" = "$ip" ]; then warn "该 IP 已存在。"; return; fi; done
-  NODE_WHITELIST_IPS+=("$ip"); save_node_whitelist; sync_firewall_whitelist
+  NODE_WHITELIST_IPS+=("$ip")
+  save_node_whitelist
+  sync_firewall_whitelist
 }
 
 firewall_add_batch() {
@@ -229,7 +245,8 @@ firewall_add_batch() {
     for item in "${NODE_WHITELIST_IPS[@]}"; do if [ "$item" = "$ip" ]; then exists=1; break; fi; done
     if [ "$exists" -eq 0 ]; then NODE_WHITELIST_IPS+=("$ip"); ok "已加入 $ip"; fi
   done
-  save_node_whitelist; sync_firewall_whitelist
+  save_node_whitelist
+  sync_firewall_whitelist
 }
 
 firewall_delete_rule() {
@@ -238,19 +255,25 @@ firewall_delete_rule() {
   list_firewall_whitelist
   read -r -p "请输入序号删除: " idx
   if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le "${#NODE_WHITELIST_IPS[@]}" ]; then
-    local del_ip="${NODE_WHITELIST_IPS[$((idx - 1))]}"; local next=()
+    local del_ip="${NODE_WHITELIST_IPS[$((idx - 1))]}"
+    local next=()
     for ip in "${NODE_WHITELIST_IPS[@]}"; do if [ "$ip" != "$del_ip" ]; then next+=("$ip"); fi; done
-    NODE_WHITELIST_IPS=("${next[@]}"); save_node_whitelist; sync_firewall_whitelist; ok "已成功删除: $del_ip"
+    NODE_WHITELIST_IPS=("${next[@]}"); save_node_whitelist; sync_firewall_whitelist
+    ok "已成功删除: $del_ip"
   else warn "输入序号无效。"; fi
 }
 
 firewall_clear() {
   read -r -p "确认清空白名单？(y/n): " confirm
-  if [ "$confirm" = "y" ]; then NODE_WHITELIST_IPS=(); save_node_whitelist; sync_firewall_whitelist; ok "已清空"; fi
+  if [ "$confirm" = "y" ]; then
+    NODE_WHITELIST_IPS=(); save_node_whitelist; sync_firewall_whitelist
+    ok "白名单已清空"
+  fi
 }
 
 validate_ipv4() {
-  local ip="$1" a b c d extra; IFS=. read -r a b c d extra <<EOF
+  local ip="$1" a b c d extra
+  IFS=. read -r a b c d extra <<EOF
 $ip
 EOF
   [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ -n "$d" ] && [ -z "$extra" ] || return 1
@@ -284,9 +307,9 @@ port_53_is_busy() { command_exists ss && ss -luntp 2>/dev/null | grep -E ':53[[:
 
 release_port_53() {
   if command_exists systemctl && systemctl is-active systemd-resolved >/dev/null 2>&1; then
-    systemctl stop systemd-resolved 2>/dev/null || true; systemctl disable systemd-resolved 2>/dev/null || true
+    systemctl stop systemd-resolved 2>/dev/null || true
+    systemctl disable systemd-resolved 2>/dev/null || true
   fi
-  # 修复乱码：把 fuser 的输出彻底屏蔽
   if port_53_is_busy; then if command_exists fuser; then fuser -k -9 53/tcp 53/udp >/dev/null 2>&1 || true; fi; fi
   sleep 1
 }
@@ -295,15 +318,16 @@ check_ai_endpoint() {
   local url="$1" code
   code="$(curl -k -sS -L --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)"
   if [ -n "$code" ] && [ "$code" != "000" ]; then printf "  [OK]   %s -> HTTP %s\n" "$url" "$code"; return 0; fi
-  printf "  [FAIL] %s\n" "$url"; return 1
+  printf "  [FAIL] %s\n" "$url"
+  return 1
 }
 
 check_port_443() {
   if command_exists ss; then
     local occupied
-    occupied="$(ss -luntp 2>/dev/null | grep -E ':(443|80)[[:space:]]')"
-    if [ -n "$occupied" ]; then
-      warn "检测到 443 端口被占用，SNIProxy 无法启动！"
+    occupied="$(ss -luntp 2>/dev/null | grep -E ':(443)[[:space:]]')"
+    if [ -n "$occupied" ] && ! echo "$occupied" | grep -qi "sniproxy"; then
+      warn "检测到 443 端口被其他服务占用，SNIProxy 无法启动！"
       echo "$occupied" | awk '{print "占用进程: " $NF}'
       return 1
     fi
@@ -324,12 +348,29 @@ show_unlock_summary() {
   echo "--------------------------------------"
   printf "核心服务状态：\n"
   printf "  dnsmasq: %s\n" "$(service_status dnsmasq)"
+  
   local sni_stat="$(service_status sniproxy)"
+  # ★★★ 自动修复 SNIProxy 僵尸进程的照妖镜逻辑 ★★★
+  if [ "$sni_stat" != "active" ]; then
+    if command_exists ss; then
+      local occupied="$(ss -luntp 2>/dev/null | grep -E ':(443)[[:space:]]')"
+      if echo "$occupied" | grep -qi "sniproxy"; then
+        info "检测到 443 端口被残留的 sniproxy 占用，正在物理强杀恢复..."
+        local sni_pids="$(echo "$occupied" | grep -i sniproxy | grep -o 'pid=[0-9]*' | awk -F= '{print $2}')"
+        for p in $sni_pids; do kill -9 "$p" 2>/dev/null || true; done
+        if command_exists killall; then killall -9 sniproxy 2>/dev/null || true; fi
+        if command_exists pkill; then pkill -9 sniproxy 2>/dev/null || true; fi
+        sleep 1
+        service_start sniproxy
+        sni_stat="$(service_status sniproxy)"
+      fi
+    fi
+  fi
+  
   printf "  sniproxy: %s\n" "$sni_stat"
-  if [ "$sni_stat" = "inactive" ]; then
+  if [ "$sni_stat" != "active" ]; then
     warn "SNIProxy 未运行！"
     check_port_443
-    if command_exists journalctl; then echo "报错日志:"; journalctl -u sniproxy -n 3 --no-pager | grep -i "failed\|bind"; fi
   fi
   echo "--------------------------------------"
   FIREWALL_BACKEND="$(firewall_detect_backend)"
@@ -380,12 +421,19 @@ EOF
     while IFS= read -r domain; do [ -z "$domain" ] && continue; escaped="$(escape_regex_domain "$domain")"; printf '    ^%s$ *\n    .*\\.%s$ *\n' "$escaped" "$escaped"; done < <(collect_domains)
     printf '}\n'
   } > "$SNI_CONF"
-  
-  # 修复僵尸进程：强杀老进程保证重启绝对纯净
+
+  # ★★★ 绝杀：更新规则时直接拔掉所有 sniproxy 钉子户进程 ★★★
   service_stop sniproxy
   if command_exists killall; then killall -9 sniproxy >/dev/null 2>&1 || true; fi
-  
-  service_restart dnsmasq; service_start sniproxy
+  if command_exists pkill; then pkill -9 sniproxy >/dev/null 2>&1 || true; fi
+  if command_exists ss; then
+    local sni_pids="$(ss -luntp 2>/dev/null | grep ':443 ' | grep -i sniproxy | grep -o 'pid=[0-9]*' | awk -F= '{print $2}')"
+    for p in $sni_pids; do kill -9 "$p" >/dev/null 2>&1 || true; done
+  fi
+  sleep 1
+
+  service_restart dnsmasq
+  service_start sniproxy
   ok "配置已更新并重启。"
 }
 
@@ -426,7 +474,7 @@ uninstall_unlock_core() {
     info "清理文件..."
     rm -rf "$BASE_DIR"
     rm -f "$DNSMASQ_CONF" "$SNI_CONF"
-    service_stop dnsmasq; 
+    service_stop dnsmasq
     if command_exists killall; then killall -9 sniproxy >/dev/null 2>&1 || true; fi
     ok "清理完毕，已恢复原生状态！"
   fi
@@ -530,9 +578,7 @@ test_node_dns() {
     if [ -n "$resolved" ]; then
       if [ "$resolved" = "$configured_dns" ]; then printf "  %b %s -> %s\n" "$(color 32 "[成功]")" "$domain" "$resolved"
       else printf "  %b %s -> %s\n" "$(color 31 "[失败]")" "$domain" "$resolved"; fi
-    else
-      printf "  %b %s -> 超时 (请检查白名单/安全组)\n" "$(color 33 "[超时]")" "$domain"
-    fi
+    else printf "  %b %s -> 超时 (请检查白名单/安全组)\n" "$(color 33 "[超时]")" "$domain"; fi
   done
 
   echo "--------------------------------------"
@@ -553,7 +599,7 @@ unlock_menu() {
     printf "%b\n" "$(color 36 "======================================")"
     printf "%b\n" "$(color 36 "           部署解锁机")"
     printf "%b\n" "$(color 36 "======================================")"
-    printf "  %b 安装\n" "$(color 32 "1.")"
+    printf "  %b 安装/更新环境\n" "$(color 32 "1.")"
     printf "  %b 运行状态检测\n" "$(color 32 "2.")"
     printf "  %b 域名池管理\n" "$(color 32 "3.")"
     printf "  %b 白名单管理\n" "$(color 32 "4.")"
