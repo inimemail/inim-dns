@@ -43,7 +43,7 @@ SERVER_IP=""
 FIREWALL_BACKEND=""
 NODE_WHITELIST_IPS=()
 
-# ================= 基础输出与检查 =================
+# ================= 基础输出与检查函数 =================
 color() { printf "\033[%sm%s\033[0m" "$1" "$2"; }
 info() { printf "%b\n" "$(color 36 "ℹ️  $*")"; }
 ok() { printf "%b\n" "$(color 32 "✅ $*")"; }
@@ -72,20 +72,31 @@ install_packages() {
   if command_exists apt-get; then apt-get update -y; DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
   elif command_exists dnf; then dnf install -y "${packages[@]}"
   elif command_exists yum; then yum install -y "${packages[@]}"
+  elif command_exists pacman; then pacman -Sy --noconfirm "${packages[@]}"
+  elif command_exists zypper; then zypper --non-interactive install -y "${packages[@]}"
+  elif command_exists apk; then apk add --no-cache "${packages[@]}"
   else err "未找到包管理器。"; return 1; fi
 }
 
 service_restart() { local svc="$1"; if command_exists systemctl; then systemctl restart "$svc"; elif command_exists service; then service "$svc" restart; fi; }
 service_enable() { local svc="$1"; if command_exists systemctl; then systemctl enable "$svc" >/dev/null 2>&1; fi; }
 service_start() { local svc="$1"; if command_exists systemctl; then systemctl start "$svc"; elif command_exists service; then service "$svc" start; fi; }
-service_stop() { local svc="$1"; if command_exists systemctl; then systemctl stop "$svc" >/dev/null 2>&1 || true; fi; }
+service_stop() { local svc="$1"; if command_exists systemctl; then systemctl stop "$svc" >/dev/null 2>&1 || true; elif command_exists service; then service "$svc" stop >/dev/null 2>&1 || true; fi; }
 service_status() { local svc="$1"; if command_exists systemctl; then systemctl is-active "$svc" >/dev/null 2>&1 && echo "active" || echo "inactive"; else echo "unknown"; fi; }
 
-# ================= 防火墙管理 =================
+# ================= 防火墙管理核心 =================
 firewall_detect_backend() {
   if command_exists nft; then echo "nftables"; return; fi
   if command_exists iptables; then echo "iptables"; return; fi
   echo "none"
+}
+
+firewall_backend_ready() { [ "$(firewall_detect_backend)" != "none" ]; }
+
+install_firewall_tools() {
+  firewall_backend_ready && return 0
+  install_packages nftables iptables || true
+  firewall_backend_ready
 }
 
 firewall_init_backend() {
@@ -128,6 +139,7 @@ save_node_whitelist() {
 sync_firewall_whitelist() {
   firewall_init_backend || return 1
   load_node_whitelist
+  local ip
   if [ "$FIREWALL_BACKEND" = "nftables" ]; then
     nft flush set inet ai_unlock node_whitelist 2>/dev/null || true
     for ip in "${NODE_WHITELIST_IPS[@]}"; do validate_ipv4 "$ip" || continue; nft add element inet ai_unlock node_whitelist "{ $ip }" 2>/dev/null || true; done
@@ -195,8 +207,7 @@ list_firewall_whitelist() {
   load_node_whitelist
   printf "防火墙后端: %s\n" "$FIREWALL_BACKEND"
   if [ "${#NODE_WHITELIST_IPS[@]}" -eq 0 ]; then printf "  暂无节点 IP\n"; else
-    local i=1
-    for ip in "${NODE_WHITELIST_IPS[@]}"; do printf "  [%b] %s\n" "$(color 33 "$i")" "$ip"; ((i++)); done
+    local i=1; for ip in "${NODE_WHITELIST_IPS[@]}"; do printf "  [%b] %s\n" "$(color 33 "$i")" "$ip"; ((i++)); done
   fi
 }
 
@@ -227,11 +238,9 @@ firewall_delete_rule() {
   list_firewall_whitelist
   read -r -p "请输入序号删除: " idx
   if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le "${#NODE_WHITELIST_IPS[@]}" ]; then
-    local del_ip="${NODE_WHITELIST_IPS[$((idx - 1))]}"
-    local next=()
+    local del_ip="${NODE_WHITELIST_IPS[$((idx - 1))]}"; local next=()
     for ip in "${NODE_WHITELIST_IPS[@]}"; do if [ "$ip" != "$del_ip" ]; then next+=("$ip"); fi; done
-    NODE_WHITELIST_IPS=("${next[@]}"); save_node_whitelist; sync_firewall_whitelist
-    ok "已成功删除: $del_ip"
+    NODE_WHITELIST_IPS=("${next[@]}"); save_node_whitelist; sync_firewall_whitelist; ok "已成功删除: $del_ip"
   else warn "输入序号无效。"; fi
 }
 
@@ -277,7 +286,8 @@ release_port_53() {
   if command_exists systemctl && systemctl is-active systemd-resolved >/dev/null 2>&1; then
     systemctl stop systemd-resolved 2>/dev/null || true; systemctl disable systemd-resolved 2>/dev/null || true
   fi
-  if port_53_is_busy; then if command_exists fuser; then fuser -k 53/tcp 53/udp 2>/dev/null || true; fi; fi
+  # 修复乱码：把 fuser 的输出彻底屏蔽
+  if port_53_is_busy; then if command_exists fuser; then fuser -k -9 53/tcp 53/udp >/dev/null 2>&1 || true; fi; fi
   sleep 1
 }
 
@@ -293,7 +303,7 @@ check_port_443() {
     local occupied
     occupied="$(ss -luntp 2>/dev/null | grep -E ':(443|80)[[:space:]]')"
     if [ -n "$occupied" ]; then
-      warn "检测到 443 端口被其他服务占用，SNIProxy 无法启动！"
+      warn "检测到 443 端口被占用，SNIProxy 无法启动！"
       echo "$occupied" | awk '{print "占用进程: " $NF}'
       return 1
     fi
@@ -317,14 +327,14 @@ show_unlock_summary() {
   local sni_stat="$(service_status sniproxy)"
   printf "  sniproxy: %s\n" "$sni_stat"
   if [ "$sni_stat" = "inactive" ]; then
-    warn "SNIProxy 未运行！正在检查 443 端口占用情况..."
+    warn "SNIProxy 未运行！"
     check_port_443
-    if command_exists journalctl; then echo "最近报错日志:"; journalctl -u sniproxy -n 5 --no-pager | grep -i "error\|failed\|bind"; fi
+    if command_exists journalctl; then echo "报错日志:"; journalctl -u sniproxy -n 3 --no-pager | grep -i "failed\|bind"; fi
   fi
   echo "--------------------------------------"
   FIREWALL_BACKEND="$(firewall_detect_backend)"
   printf "防火墙后端: %s (放行 IP 数: %s)\n" "$FIREWALL_BACKEND" "$([ -s "$NODE_WHITELIST_FILE" ] && wc -l < "$NODE_WHITELIST_FILE" || echo 0)"
-  info "注意：若节点机仍提示 DNS 解析超时，请务必去云服务商网页控制台开放 53 端口！"
+  info "若节点机仍提示 DNS 解析超时，请去云服务商网页控制台开放 53 端口！"
   echo "--------------------------------------"
   printf "本机 AI 连通性：\n"
   local url ok_count=0
@@ -370,7 +380,12 @@ EOF
     while IFS= read -r domain; do [ -z "$domain" ] && continue; escaped="$(escape_regex_domain "$domain")"; printf '    ^%s$ *\n    .*\\.%s$ *\n' "$escaped" "$escaped"; done < <(collect_domains)
     printf '}\n'
   } > "$SNI_CONF"
-  service_restart dnsmasq; service_restart sniproxy
+  
+  # 修复僵尸进程：强杀老进程保证重启绝对纯净
+  service_stop sniproxy
+  if command_exists killall; then killall -9 sniproxy >/dev/null 2>&1 || true; fi
+  
+  service_restart dnsmasq; service_start sniproxy
   ok "配置已更新并重启。"
 }
 
@@ -411,7 +426,8 @@ uninstall_unlock_core() {
     info "清理文件..."
     rm -rf "$BASE_DIR"
     rm -f "$DNSMASQ_CONF" "$SNI_CONF"
-    service_stop dnsmasq; service_stop sniproxy
+    service_stop dnsmasq; 
+    if command_exists killall; then killall -9 sniproxy >/dev/null 2>&1 || true; fi
     ok "清理完毕，已恢复原生状态！"
   fi
 }
@@ -514,7 +530,9 @@ test_node_dns() {
     if [ -n "$resolved" ]; then
       if [ "$resolved" = "$configured_dns" ]; then printf "  %b %s -> %s\n" "$(color 32 "[成功]")" "$domain" "$resolved"
       else printf "  %b %s -> %s\n" "$(color 31 "[失败]")" "$domain" "$resolved"; fi
-    else printf "  %b %s -> 超时 (请检查白名单/安全组)\n" "$(color 33 "[超时]")" "$domain"; fi
+    else
+      printf "  %b %s -> 超时 (请检查白名单/安全组)\n" "$(color 33 "[超时]")" "$domain"
+    fi
   done
 
   echo "--------------------------------------"
