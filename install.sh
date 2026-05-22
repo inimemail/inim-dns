@@ -13,7 +13,6 @@ FIREWALL_CHAIN="AI_UNLOCK_DNS"
 SYNC_SCRIPT="$BASE_DIR/sync_firewall.sh"
 SYSTEMD_SERVICE="/etc/systemd/system/ai-unlock-firewall.service"
 
-# 包含所有默认测试的 AI 域名
 AI_CHECK_URLS=(
   "https://chatgpt.com"
   "https://claude.ai"
@@ -63,9 +62,7 @@ ensure_base_dir() {
 detect_public_ip() {
   if [ -n "$SERVER_IP" ]; then printf '%s\n' "$SERVER_IP"; return; fi
   SERVER_IP="$(curl -fs4 --max-time 5 https://ifconfig.me 2>/dev/null || true)"
-  if [ -z "$SERVER_IP" ] && command_exists hostname; then
-    SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
-  fi
+  if [ -z "$SERVER_IP" ] && command_exists hostname; then SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"; fi
   if [ -z "$SERVER_IP" ]; then read -r -p "请输入解锁机公网 IP: " SERVER_IP; fi
   printf '%s\n' "$SERVER_IP"
 }
@@ -78,7 +75,7 @@ install_packages() {
   elif command_exists pacman; then pacman -Sy --noconfirm "${packages[@]}"
   elif command_exists zypper; then zypper --non-interactive install -y "${packages[@]}"
   elif command_exists apk; then apk add --no-cache "${packages[@]}"
-  else err "未找到可用的包管理器。"; return 1; fi
+  else err "未找到包管理器。"; return 1; fi
 }
 
 service_restart() { local svc="$1"; if command_exists systemctl; then systemctl restart "$svc"; elif command_exists service; then service "$svc" restart; fi; }
@@ -115,10 +112,7 @@ firewall_init_backend() {
     return 0
   fi
   if [ "$FIREWALL_BACKEND" = "iptables" ]; then
-    if ! iptables -nL "$FIREWALL_CHAIN" >/dev/null 2>&1; then
-      iptables -N "$FIREWALL_CHAIN" 2>/dev/null || true
-      iptables -A "$FIREWALL_CHAIN" -j DROP 2>/dev/null || true
-    fi
+    if ! iptables -nL "$FIREWALL_CHAIN" >/dev/null 2>&1; then iptables -N "$FIREWALL_CHAIN" 2>/dev/null || true; iptables -A "$FIREWALL_CHAIN" -j DROP 2>/dev/null || true; fi
     iptables -C INPUT -p udp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null || iptables -I INPUT -p udp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null || true
     iptables -C INPUT -p tcp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null || iptables -I INPUT -p tcp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null || true
     return 0
@@ -172,7 +166,7 @@ sync_firewall_whitelist() {
 }
 
 setup_firewall_persistence() {
-  info "正在配置防火墙开机持久化..."
+  info "配置防火墙开机持久化..."
   cat > "$SYNC_SCRIPT" << 'EOF'
 #!/bin/bash
 NODE_WHITELIST_FILE="/etc/ai_unlock/node_whitelist.conf"
@@ -231,13 +225,19 @@ list_firewall_whitelist() {
   load_node_whitelist
   printf "防火墙后端: %s\n" "$FIREWALL_BACKEND"
   printf "白名单文件: %s\n" "$NODE_WHITELIST_FILE"
-  if [ "${#NODE_WHITELIST_IPS[@]}" -eq 0 ]; then printf "  暂无节点 IP\n"; else
-    for ip in "${NODE_WHITELIST_IPS[@]}"; do printf "  %s\n" "$ip"; done
+  if [ "${#NODE_WHITELIST_IPS[@]}" -eq 0 ]; then 
+    printf "  暂无节点 IP\n"
+  else
+    local i=1
+    for ip in "${NODE_WHITELIST_IPS[@]}"; do 
+      printf "  [%b] %s\n" "$(color 33 "$i")" "$ip"
+      ((i++))
+    done
   fi
 }
 
 firewall_add_ip() {
-  read -r -p "请输入要放行的节点 IP: " ip
+  read -r -p "输入要放行的节点 IP: " ip
   if ! validate_ipv4 "$ip"; then warn "IP 格式不正确。"; return; fi
   load_node_whitelist
   for item in "${NODE_WHITELIST_IPS[@]}"; do if [ "$item" = "$ip" ]; then warn "该 IP 已存在。"; return; fi; done
@@ -247,7 +247,7 @@ firewall_add_ip() {
 }
 
 firewall_add_batch() {
-  read -r -p "请输入多个 IP（空格或逗号分隔）: " list
+  read -r -p "输入多个 IP（空格或逗号分隔）: " list
   list="$(printf '%s' "$list" | tr ',' ' ')"
   load_node_whitelist
   local ip item exists
@@ -264,34 +264,22 @@ firewall_add_batch() {
 firewall_delete_rule() {
   load_node_whitelist
   if [ "${#NODE_WHITELIST_IPS[@]}" -eq 0 ]; then warn "当前没有白名单。"; return; fi
-  echo "请选择要删除的节点 IP 序号:"
-  local i=1
-  for ip in "${NODE_WHITELIST_IPS[@]}"; do
-    printf "  [%b] %s\n" "$(color 33 "$i")" "$ip"
-    i=$((i + 1))
-  done
-  read -r -p "请输入序号: " idx
+  list_firewall_whitelist
+  read -r -p "请输入序号删除: " idx
   if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le "${#NODE_WHITELIST_IPS[@]}" ]; then
     local del_ip="${NODE_WHITELIST_IPS[$((idx - 1))]}"
     local next=()
-    for ip in "${NODE_WHITELIST_IPS[@]}"; do
-      if [ "$ip" != "$del_ip" ]; then next+=("$ip"); fi
-    done
-    NODE_WHITELIST_IPS=("${next[@]}")
-    save_node_whitelist
-    sync_firewall_whitelist
+    for ip in "${NODE_WHITELIST_IPS[@]}"; do if [ "$ip" != "$del_ip" ]; then next+=("$ip"); fi; done
+    NODE_WHITELIST_IPS=("${next[@]}"); save_node_whitelist; sync_firewall_whitelist
     ok "已成功删除: $del_ip"
-  else
-    warn "输入序号无效。"
-  fi
+  else warn "输入序号无效。"; fi
 }
 
 firewall_clear() {
-  read -r -p "确认清空所有节点白名单？(y/n): " confirm
+  read -r -p "确认清空白名单？(y/n): " confirm
   if [ "$confirm" = "y" ]; then
-    NODE_WHITELIST_IPS=()
-    save_node_whitelist
-    sync_firewall_whitelist
+    NODE_WHITELIST_IPS=(); save_node_whitelist; sync_firewall_whitelist
+    ok "白名单已清空"
   fi
 }
 
@@ -318,15 +306,13 @@ backup_resolv_conf() {
 }
 
 restore_resolv_conf() {
+  chattr -i /etc/resolv.conf 2>/dev/null || true
   if [ -f "$RESOLV_BACKUP" ]; then
-    chattr -i /etc/resolv.conf 2>/dev/null || true
     cp -f "$RESOLV_BACKUP" /etc/resolv.conf
-    chattr +i /etc/resolv.conf 2>/dev/null || true
-    ok "已恢复本机 DNS 备份。"
+    ok "已恢复原生 DNS。"
   else
-    warn "未找到备份文件，已强制恢复为默认公共 DNS (8.8.8.8 / 1.1.1.1)。"
+    warn "未找到备份，重置为 8.8.8.8 / 1.1.1.1。"
     write_public_resolv_conf
-    ok "本机 DNS 已重置为公共 DNS。"
   fi
 }
 
@@ -336,11 +322,11 @@ backup_unlock_resolv_conf() {
 }
 
 restore_unlock_resolv_conf() {
+  chattr -i /etc/resolv.conf 2>/dev/null || true
   if [ -f "$UNLOCK_RESOLV_BACKUP" ]; then
-    chattr -i /etc/resolv.conf 2>/dev/null || true
     cp -a "$UNLOCK_RESOLV_BACKUP" /etc/resolv.conf 2>/dev/null || true
-    ok "已恢复解锁机本地 DNS。"
-  else
+    ok "已恢复原生 DNS。"
+  else 
     write_public_resolv_conf
   fi
 }
@@ -349,14 +335,10 @@ port_53_is_busy() { command_exists ss && ss -luntp 2>/dev/null | grep -E ':53[[:
 
 release_port_53() {
   if command_exists systemctl && systemctl is-active systemd-resolved >/dev/null 2>&1; then
-    info "正在关闭占用的 systemd-resolved..."
     systemctl stop systemd-resolved 2>/dev/null || true
     systemctl disable systemd-resolved 2>/dev/null || true
   fi
-  if port_53_is_busy; then
-    info "53端口仍被占用，尝试强制释放..."
-    if command_exists fuser; then fuser -k 53/tcp 53/udp 2>/dev/null || true; fi
-  fi
+  if port_53_is_busy; then if command_exists fuser; then fuser -k 53/tcp 53/udp 2>/dev/null || true; fi; fi
   sleep 1
 }
 
@@ -371,16 +353,8 @@ check_ai_endpoint() {
 
 show_port_53_listeners() {
   printf "53 端口监听：\n"
-  if ! command_exists ss; then printf "  ss 不可用，无法检查。\n"; return; fi
+  if ! command_exists ss; then printf "  ss 不可用。\n"; return; fi
   if port_53_is_busy; then ss -luntp 2>/dev/null | awk 'NR==1 || /:53[[:space:]]/'; else printf "  未发现占用。\n"; fi
-}
-
-show_systemd_resolved_status() {
-  printf "systemd-resolved：\n"
-  if command_exists systemctl; then
-    printf "  active: %s\n" "$(systemctl is-active systemd-resolved 2>/dev/null || echo unknown)"
-    printf "  enabled: %s\n" "$(systemctl is-enabled systemd-resolved 2>/dev/null || echo unknown)"
-  else printf "  systemctl 不可用。\n"; fi
 }
 
 show_unlock_service_status() {
@@ -389,14 +363,8 @@ show_unlock_service_status() {
   printf "  sniproxy: %s\n" "$(service_status sniproxy)"
 }
 
-show_unlock_config_status() {
-  printf "配置状态：\n"
-  printf "  dnsmasq.conf: %s\n" "$([ -s "$DNSMASQ_CONF" ] && echo ready || echo missing)"
-  printf "  sniproxy.conf: %s\n" "$([ -s "$SNI_CONF" ] && echo ready || echo missing)"
-}
-
 show_ai_connectivity() {
-  printf "AI 主流域名穿透连通性测试：\n"
+  printf "本机 AI 连通性：\n"
   local url ok_count=0
   for url in "${AI_CHECK_URLS[@]}"; do if check_ai_endpoint "$url"; then ok_count=$((ok_count + 1)); fi; done
   printf "  通过项: %s/%s\n" "$ok_count" "${#AI_CHECK_URLS[@]}"
@@ -405,17 +373,16 @@ show_ai_connectivity() {
 show_unlock_summary() {
   clear
   printf "%b\n" "$(color 36 "======================================")"
-  printf "%b\n" "$(color 36 "           解锁机综合检测结果")"
+  printf "%b\n" "$(color 36 "           运行状态检测")"
   printf "%b\n" "$(color 36 "======================================")"
   printf "公网 IP: %s\n" "$(detect_public_ip)"
   echo "--------------------------------------"
   show_port_53_listeners
   echo "--------------------------------------"
   show_unlock_service_status
-  show_unlock_config_status
   echo "--------------------------------------"
   FIREWALL_BACKEND="$(firewall_detect_backend)"
-  printf "防火墙后端: %s (已放行 IP 数: %s)\n" "$FIREWALL_BACKEND" "$([ -s "$NODE_WHITELIST_FILE" ] && wc -l < "$NODE_WHITELIST_FILE" || echo 0)"
+  printf "防火墙后端: %s (放行 IP 数: %s)\n" "$FIREWALL_BACKEND" "$([ -s "$NODE_WHITELIST_FILE" ] && wc -l < "$NODE_WHITELIST_FILE" || echo 0)"
   echo "--------------------------------------"
   show_ai_connectivity
 }
@@ -428,8 +395,8 @@ is_unlock_installed() {
 
 confirm_reinstall_requested() {
   if ! is_unlock_installed; then return 0; fi
-  read -r -p "检测到已存在配置文件，是否覆盖重新安装？(y/N): " confirm
-  case "$confirm" in y|Y) return 0 ;; *) warn "已取消安装。"; return 1 ;; esac
+  read -r -p "检测到已安装，覆盖重装？(y/N): " confirm
+  case "$confirm" in y|Y) return 0 ;; *) warn "已取消。"; return 1 ;; esac
 }
 
 sanitize_domain() { printf '%s' "$1" | sed -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' -e 's#^\\*\\.##' -e 's#/.*##' -e 's/:.*//'; }
@@ -471,7 +438,7 @@ update_rules() {
   ensure_base_dir
   mkdir -p /etc/dnsmasq.d
   SERVER_IP="$(detect_public_ip)"
-  info "正在生成分流配置文件..."
+  info "生成分流配置..."
   {
     printf '# generated by ai_unlock installer\n'
     while IFS= read -r domain; do
@@ -499,25 +466,24 @@ EOF
 
   service_restart dnsmasq
   service_restart sniproxy
-  ok "域名规则已更新并重启服务。"
+  ok "配置已更新并重启。"
 }
 
 install_unlock_core() {
   if ! confirm_reinstall_requested; then return 1; fi
-  info "正在进行安装前环境检查..."
+  info "环境检查..."
   backup_unlock_resolv_conf
   release_port_53
   write_public_resolv_conf
 
   if port_53_is_busy; then
-    err "53 端口仍被占用，无法继续安装。"
+    err "53 端口仍被占用。"
     show_port_53_listeners; return 1
   fi
 
-  info "正在安装基础组件(dnsmasq/sniproxy/dnsutils)..."
+  info "安装依赖..."
   install_packages dnsmasq sniproxy curl e2fsprogs iproute2 psmisc dnsutils || return 1
-  install_firewall_tools || warn "未检测到 nftables/iptables，节点白名单功能将不可用。"
-  
+  install_firewall_tools || warn "未检测到 nftables/iptables，白名单功能将不可用。"
   firewall_init_backend || warn "未检测到可用防火墙后端。"
 
   service_enable dnsmasq
@@ -527,74 +493,83 @@ install_unlock_core() {
   setup_firewall_persistence
   
   show_unlock_summary
-  ok "解锁机核心已部署完成！请进入白名单管理添加您的节点 IP。"
+  ok "部署完成！请进入白名单添加节点 IP。"
 }
 
 uninstall_unlock_core() {
-  read -r -p "确认卸载并彻底删除所有配置？(y/n): " confirm
+  read -r -p "确认彻底卸载清理环境？(y/n): " confirm
   if [ "$confirm" = "y" ]; then
-    info "正在停止并清理服务..."
+    info "清理服务..."
     if command_exists systemctl; then
       systemctl disable ai-unlock-firewall.service 2>/dev/null || true
       systemctl stop ai-unlock-firewall.service 2>/dev/null || true
       rm -f "$SYSTEMD_SERVICE"
       systemctl daemon-reload 2>/dev/null || true
     fi
-    
-    info "正在彻底清理防火墙规则..."
+    info "清理防火墙规则..."
     remove_firewall_rules
-    
-    info "正在恢复本机原生 DNS..."
+    info "恢复原生 DNS..."
     restore_unlock_resolv_conf
     if command_exists systemctl; then
       systemctl enable systemd-resolved 2>/dev/null || true
       systemctl start systemd-resolved 2>/dev/null || true
     fi
-
-    info "正在移除配置文件 (挫骨扬灰)..."
+    info "清理文件..."
     rm -rf "$BASE_DIR"
     rm -f "$DNSMASQ_CONF" "$SNI_CONF"
-    
     service_stop dnsmasq
     service_stop sniproxy
-    
-    ok "已清理全部配置，恢复原生状态！"
+    ok "清理完毕，已恢复原生状态！"
   fi
 }
 
-# ================= 域名池与防火墙菜单 =================
+# ================= 菜单 =================
+show_domain_pool() {
+  load_custom_domains
+  printf "\n%b\n" "$(color 36 "默认域名池")"
+  echo "${BASE_DOMAINS[*]}" | fold -w 80 | sed 's/^/  /'
+  printf "\n%b\n" "$(color 36 "自定义域名池")"
+  if [ "${#CUSTOM_DOMAINS[@]}" -eq 0 ]; then 
+    echo "  暂无"
+  else 
+    local i=1
+    for d in "${CUSTOM_DOMAINS[@]}"; do
+      printf "  [%b] %s\n" "$(color 33 "$i")" "$d"
+      ((i++))
+    done
+  fi
+}
+
 domain_menu() {
   while true; do
     clear
     printf "%b\n" "$(color 36 "======================================")"
     printf "%b\n" "$(color 36 "         域名池管理")"
     printf "%b\n" "$(color 36 "======================================")"
-    printf "  %b 查看当前域名池\n" "$(color 32 "1.")"
-    printf "  %b 添加自定义域名\n" "$(color 32 "2.")"
-    printf "  %b 删除自定义域名 (按序号)\n" "$(color 32 "3.")"
-    printf "  %b 清空所有自定义域名\n" "$(color 32 "4.")"
-    printf "  %b 恢复默认域名池\n" "$(color 32 "5.")"
+    printf "  %b 查看域名池\n" "$(color 32 "1.")"
+    printf "  %b 添加域名\n" "$(color 32 "2.")"
+    printf "  %b 删除域名\n" "$(color 32 "3.")"
+    printf "  %b 清空自定义\n" "$(color 32 "4.")"
+    printf "  %b 恢复默认\n" "$(color 32 "5.")"
     printf "  %b 返回\n" "$(color 32 "0.")"
     printf "%b\n" "$(color 36 "======================================")"
     read -r -p "请选择 [0-5]: " choice
     case "$choice" in
-      1) load_custom_domains; printf "\n%b\n" "$(color 36 "默认池")"; printf ' %s\n' "${BASE_DOMAINS[@]}"; printf "\n%b\n" "$(color 36 "自定义池")"; if [ "${#CUSTOM_DOMAINS[@]}" -eq 0 ]; then echo " 暂无"; else printf ' %s\n' "${CUSTOM_DOMAINS[@]}"; fi; pause ;;
-      2) read -r -p "要添加的域名: " d; d="$(sanitize_domain "$d")"; if [ -n "$d" ]; then load_custom_domains; CUSTOM_DOMAINS+=("$d"); write_custom_domains; ok "已添加 $d"; fi; pause ;;
+      1) show_domain_pool; pause ;;
+      2) read -r -p "添加域名: " d; d="$(sanitize_domain "$d")"; if [ -n "$d" ]; then load_custom_domains; CUSTOM_DOMAINS+=("$d"); write_custom_domains; ok "已添加 $d"; fi; pause ;;
       3) 
          load_custom_domains
          if [ "${#CUSTOM_DOMAINS[@]}" -eq 0 ]; then warn "当前无自定义域名。"; pause; continue; fi
-         echo "请选择要删除的域名序号:"
-         local i=1
-         for d in "${CUSTOM_DOMAINS[@]}"; do printf "  [%b] %s\n" "$(color 33 "$i")" "$d"; i=$((i + 1)); done
-         read -r -p "请输入序号: " idx
+         show_domain_pool
+         read -r -p "输入序号删除: " idx
          if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le "${#CUSTOM_DOMAINS[@]}" ]; then
            local del_d="${CUSTOM_DOMAINS[$((idx - 1))]}"
            local nx=()
            for d in "${CUSTOM_DOMAINS[@]}"; do if [ "$d" != "$del_d" ]; then nx+=("$d"); fi; done
-           CUSTOM_DOMAINS=("${nx[@]}"); write_custom_domains; ok "已成功删除: $del_d"
-         else warn "输入序号无效。"; fi
+           CUSTOM_DOMAINS=("${nx[@]}"); write_custom_domains; ok "已删除: $del_d"
+         else warn "序号无效。"; fi
          pause ;;
-      4) CUSTOM_DOMAINS=(); write_custom_domains; ok "已清空自定义域名"; pause ;;
+      4) CUSTOM_DOMAINS=(); write_custom_domains; ok "已清空"; pause ;;
       5) : > "$CUSTOM_DOMAIN_FILE"; ok "已恢复默认"; pause ;;
       0) return ;;
       *) warn "无效选项"; sleep 1 ;;
@@ -606,13 +581,13 @@ firewall_menu() {
   while true; do
     clear
     printf "%b\n" "$(color 36 "======================================")"
-    printf "%b\n" "$(color 36 "         节点白名单管理")"
+    printf "%b\n" "$(color 36 "         白名单管理")"
     printf "%b\n" "$(color 36 "======================================")"
-    printf "  %b 查看当前白名单\n" "$(color 32 "1.")"
-    printf "  %b 添加单个节点 IP\n" "$(color 32 "2.")"
-    printf "  %b 批量添加节点 IP (逗号或空格分隔)\n" "$(color 32 "3.")"
-    printf "  %b 移除单个节点 IP (按序号)\n" "$(color 32 "4.")"
-    printf "  %b 清空所有节点白名单\n" "$(color 32 "5.")"
+    printf "  %b 查看白名单\n" "$(color 32 "1.")"
+    printf "  %b 添加单个 IP\n" "$(color 32 "2.")"
+    printf "  %b 批量添加 IP\n" "$(color 32 "3.")"
+    printf "  %b 删除节点 IP\n" "$(color 32 "4.")"
+    printf "  %b 清空白名单\n" "$(color 32 "5.")"
     printf "  %b 返回\n" "$(color 32 "0.")"
     printf "%b\n" "$(color 36 "======================================")"
     read -r -p "请选择 [0-5]: " choice
@@ -630,88 +605,60 @@ firewall_menu() {
 
 # ================= 节点机功能核心 =================
 set_node_dns() {
-  read -r -p "请输入你搭建好的【解锁机】公网 IP: " unlock_ip
-  if [ -z "$unlock_ip" ]; then warn "IP 不能为空。"; return; fi
+  read -r -p "输入【解锁机】公网 IP: " unlock_ip
+  if [ -z "$unlock_ip" ]; then warn "不能为空。"; return; fi
   backup_resolv_conf
   chattr -i /etc/resolv.conf 2>/dev/null || true
-  
-  # ★★★ 修复2：只保留解锁机 IP，绝对禁止备用公共 DNS 防止偷跑泄漏 ★★★
-  {
-    printf 'nameserver %s\n' "$unlock_ip"
-  } > /etc/resolv.conf
+  { printf 'nameserver %s\n' "$unlock_ip"; } > /etc/resolv.conf
   chattr +i /etc/resolv.conf 2>/dev/null || true
-  ok "本机系统 DNS 已严格指向解锁机: $unlock_ip"
-  info "已屏蔽备用公共 DNS，防止系统底层偷跑产生 DNS Leak。"
+  ok "已指向: $unlock_ip (备用 DNS 已屏蔽)"
 }
 
 test_node_dns() {
-  # ★★★ 修复3：循环跑遍核心 AI 域名测试 ★★★
   local configured_dns
   configured_dns="$(awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf)"
+  if [ -z "$configured_dns" ]; then warn "未配置 DNS！"; return; fi
   
-  if [ -z "$configured_dns" ]; then
-     warn "本机 /etc/resolv.conf 中没有配置 DNS！"
-     return
-  fi
-  
-  info "当前系统唯一指定 DNS: $configured_dns"
+  info "当前 DNS: $configured_dns"
   echo "--------------------------------------"
-  info "正在检测核心域名分流状态..."
+  info "分流解析状态:"
 
-  # 只抽取 4 个代表性的域名进行解析测试，防止刷屏
   for domain in "chatgpt.com" "claude.ai" "gemini.google.com" "perplexity.ai"; do
     local resolved=""
-    if command_exists nslookup; then
-       resolved="$(nslookup "$domain" 2>/dev/null | grep -A1 "Name:" | grep "Address:" | awk '{print $2}' | head -n 1)"
-    fi
-    if [ -z "$resolved" ] && command_exists ping; then
-       resolved="$(ping -c 1 -W 1 "$domain" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
-    fi
+    if command_exists nslookup; then resolved="$(nslookup "$domain" 2>/dev/null | grep -A1 "Name:" | grep "Address:" | awk '{print $2}' | head -n 1)"; fi
+    if [ -z "$resolved" ] && command_exists ping; then resolved="$(ping -c 1 -W 1 "$domain" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"; fi
 
     if [ -n "$resolved" ]; then
-      if [ "$resolved" = "$configured_dns" ]; then
-          printf "  %b %s -> %s\n" "$(color 32 "[劫持生效]")" "$domain" "$resolved"
-      else
-          printf "  %b %s -> %s\n" "$(color 31 "[劫持失败]")" "$domain" "$resolved"
-      fi
+      if [ "$resolved" = "$configured_dns" ]; then printf "  %b %s -> %s\n" "$(color 32 "[成功]")" "$domain" "$resolved"
+      else printf "  %b %s -> %s\n" "$(color 31 "[失败]")" "$domain" "$resolved"; fi
     else
-      printf "  %b %s -> 无法解析 (请确认 IP 是否加了白名单)\n" "$(color 33 "[解析超时]")" "$domain"
+      printf "  %b %s -> 超时 (请检查白名单/安全组)\n" "$(color 33 "[超时]")" "$domain"
     fi
   done
 
   echo "--------------------------------------"
-  info "正在通过解锁机进行 AI 主流域名穿透连通性测试..."
-  info "(即使你的 DNS 未劫持成功，这里强制走解锁机验证 SNI 代理死没死)"
+  info "免 DNS 强制穿透测试:"
   
   for url in "${AI_CHECK_URLS[@]}"; do
     local host code
     host="$(echo "$url" | awk -F/ '{print $3}')"
-    # 使用 --resolve 强制将 443 流量发给配置的解锁机
     code="$(curl -k -sS -L --connect-timeout 5 --max-time 10 --resolve "${host}:443:${configured_dns}" -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)"
-    if [ -n "$code" ] && [ "$code" != "000" ]; then
-      printf "  %b   %s -> HTTP %s\n" "$(color 32 "[穿透成功]")" "$url" "$code"
-    else
-      printf "  %b %s -> 阻断或超时\n" "$(color 31 "[穿透失败]")" "$url"
-    fi
+    if [ -n "$code" ] && [ "$code" != "000" ]; then printf "  %b %s -> HTTP %s\n" "$(color 32 "[通畅]")" "$url" "$code"
+    else printf "  %b %s -> 阻断\n" "$(color 31 "[阻断]")" "$url"; fi
   done
-  echo "--------------------------------------"
-  info "诊断结论："
-  info "1. 如果【劫持失败】且【穿透成功】：说明解锁机没毛病，是你这台节点机的 /etc/resolv.conf 被其他进程强行覆盖了。"
-  info "2. 如果【解析超时】或【穿透失败】：说明你的节点 IP 根本没加入解锁机的白名单，或者解锁机防火墙炸了。"
 }
 
-# ================= 菜单导航 =================
 unlock_menu() {
   while true; do
     clear
     printf "%b\n" "$(color 36 "======================================")"
-    printf "%b\n" "$(color 36 "           搭建【解锁机】")"
+    printf "%b\n" "$(color 36 "           部署解锁机")"
     printf "%b\n" "$(color 36 "======================================")"
-    printf "  %b 安装与更新核心环境\n" "$(color 32 "1.")"
-    printf "  %b 综合状态检测 (检查连通性与服务)\n" "$(color 32 "2.")"
+    printf "  %b 安装/更新环境\n" "$(color 32 "1.")"
+    printf "  %b 运行状态检测\n" "$(color 32 "2.")"
     printf "  %b 域名池管理\n" "$(color 32 "3.")"
-    printf "  %b 节点白名单管理 (添加要解锁的节点 IP)\n" "$(color 32 "4.")"
-    printf "  %b 彻底卸载清理环境 (挫骨扬灰)\n" "$(color 32 "5.")"
+    printf "  %b 白名单管理\n" "$(color 32 "4.")"
+    printf "  %b 彻底卸载清理\n" "$(color 32 "5.")"
     printf "  %b 返回主菜单\n" "$(color 32 "0.")"
     printf "%b\n" "$(color 36 "======================================")"
     read -r -p "请选择 [0-5]: " choice
@@ -731,12 +678,12 @@ node_menu() {
   while true; do
     clear
     printf "%b\n" "$(color 36 "======================================")"
-    printf "%b\n" "$(color 36 "           配置【节点机】")"
+    printf "%b\n" "$(color 36 "           配置节点机")"
     printf "%b\n" "$(color 36 "======================================")"
-    printf "  %b 将本机 DNS 严格指向解锁机\n" "$(color 32 "1.")"
-    printf "  %b 恢复本机原始 DNS\n" "$(color 32 "2.")"
-    printf "  %b 节点分流智能诊断与穿透测试\n" "$(color 32 "3.")"
-    printf "  %b 查看当前 DNS 配置 (/etc/resolv.conf)\n" "$(color 32 "4.")"
+    printf "  %b 指向解锁机 DNS\n" "$(color 32 "1.")"
+    printf "  %b 恢复原生 DNS\n" "$(color 32 "2.")"
+    printf "  %b 分流诊断与测试\n" "$(color 32 "3.")"
+    printf "  %b 查看当前 DNS\n" "$(color 32 "4.")"
     printf "  %b 返回主菜单\n" "$(color 32 "0.")"
     printf "%b\n" "$(color 36 "======================================")"
     read -r -p "请选择 [0-4]: " choice
@@ -757,8 +704,8 @@ main_menu() {
     printf "%b\n" "$(color 36 "======================================")"
     printf "%b\n" "$(color 36 "         AI DNS 分流管理系统")"
     printf "%b\n" "$(color 36 "======================================")"
-    printf "  %b 进入【解锁机】面板\n" "$(color 32 "1.")"
-    printf "  %b 进入【节点机】面板\n" "$(color 32 "2.")"
+    printf "  %b 部署解锁机\n" "$(color 32 "1.")"
+    printf "  %b 配置节点机\n" "$(color 32 "2.")"
     printf "  %b 退出\n" "$(color 32 "0.")"
     printf "%b\n" "$(color 36 "======================================")"
     read -r -p "请选择 [0-2]: " choice
