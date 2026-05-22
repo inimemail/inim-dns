@@ -13,31 +13,23 @@ FIREWALL_CHAIN="AI_UNLOCK_DNS"
 SYNC_SCRIPT="$BASE_DIR/sync_firewall.sh"
 SYSTEMD_SERVICE="/etc/systemd/system/ai-unlock-firewall.service"
 
+# 包含所有默认测试的 AI 域名
 AI_CHECK_URLS=(
-  "https://openai.com"
+  "https://chatgpt.com"
   "https://claude.ai"
   "https://gemini.google.com"
   "https://copilot.microsoft.com"
   "https://perplexity.ai"
   "https://grok.com"
+  "https://deepseek.com"
+  "https://mistral.ai"
 )
 
-PUBLIC_DNS_SERVERS=(
-  "1.1.1.1"
-  "8.8.8.8"
-)
+PUBLIC_DNS_SERVERS=("1.1.1.1" "8.8.8.8")
 
-OPENAI_DOMAINS=(
-  "openai.com" "chatgpt.com" "oaiusercontent.com" "oaistatic.com"
-)
-ANTHROPIC_DOMAINS=(
-  "anthropic.com" "claude.ai" "claude.com" "claudeusercontent.com"
-)
-GOOGLE_DOMAINS=(
-  "google.com" "googleapis.com" "gstatic.com" "googleusercontent.com" 
-  "ggpht.com" "ytimg.com" "withgoogle.com" "googletagmanager.com" 
-  "googlevideo.com" "gemini.google.com" "aistudio.google.com"
-)
+OPENAI_DOMAINS=("openai.com" "chatgpt.com" "oaiusercontent.com" "oaistatic.com")
+ANTHROPIC_DOMAINS=("anthropic.com" "claude.ai" "claude.com" "claudeusercontent.com")
+GOOGLE_DOMAINS=("google.com" "googleapis.com" "gstatic.com" "googleusercontent.com" "ggpht.com" "ytimg.com" "withgoogle.com" "googletagmanager.com" "googlevideo.com" "gemini.google.com" "aistudio.google.com")
 PERPLEXITY_DOMAINS=("perplexity.ai" "perplexity.com")
 XAI_DOMAINS=("x.ai" "grok.com" "api.x.ai")
 MICROSOFT_DOMAINS=("copilot.microsoft.com" "bing.com")
@@ -46,12 +38,7 @@ DEEPSEEK_DOMAINS=("deepseek.com" "chat.deepseek.com" "api.deepseek.com" "platfor
 MISTRAL_DOMAINS=("mistral.ai" "chat.mistral.ai" "console.mistral.ai" "api.mistral.ai")
 OTHER_DOMAINS=("character.ai" "poe.com" "openrouter.ai" "platform.openrouter.ai" "meta.ai" "you.com")
 
-BASE_DOMAINS=(
-  "${OPENAI_DOMAINS[@]}" "${ANTHROPIC_DOMAINS[@]}" "${GOOGLE_DOMAINS[@]}"
-  "${PERPLEXITY_DOMAINS[@]}" "${XAI_DOMAINS[@]}" "${MICROSOFT_DOMAINS[@]}"
-  "${MIDJOURNEY_DOMAINS[@]}" "${DEEPSEEK_DOMAINS[@]}" "${MISTRAL_DOMAINS[@]}"
-  "${OTHER_DOMAINS[@]}"
-)
+BASE_DOMAINS=("${OPENAI_DOMAINS[@]}" "${ANTHROPIC_DOMAINS[@]}" "${GOOGLE_DOMAINS[@]}" "${PERPLEXITY_DOMAINS[@]}" "${XAI_DOMAINS[@]}" "${MICROSOFT_DOMAINS[@]}" "${MIDJOURNEY_DOMAINS[@]}" "${DEEPSEEK_DOMAINS[@]}" "${MISTRAL_DOMAINS[@]}" "${OTHER_DOMAINS[@]}")
 
 SERVER_IP=""
 FIREWALL_BACKEND=""
@@ -65,19 +52,12 @@ warn() { printf "%b\n" "$(color 33 "⚠️  $*")"; }
 err() { printf "%b\n" "$(color 31 "❌ $*")"; }
 pause() { read -n 1 -s -r -p "按任意键继续..."; printf "\n"; }
 
-ensure_root() {
-  if [ "$EUID" -ne 0 ]; then
-    err "请使用 root 权限运行此脚本。"
-    exit 1
-  fi
-}
-
+ensure_root() { [ "$EUID" -ne 0 ] && err "请使用 root 权限运行此脚本。" && exit 1; }
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
 ensure_base_dir() {
   mkdir -p "$BASE_DIR"
-  touch "$CUSTOM_DOMAIN_FILE"
-  touch "$NODE_WHITELIST_FILE"
+  touch "$CUSTOM_DOMAIN_FILE" "$NODE_WHITELIST_FILE"
 }
 
 detect_public_ip() {
@@ -86,18 +66,13 @@ detect_public_ip() {
   if [ -z "$SERVER_IP" ] && command_exists hostname; then
     SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
   fi
-  if [ -z "$SERVER_IP" ]; then
-    read -r -p "请输入解锁机公网 IP: " SERVER_IP
-  fi
+  if [ -z "$SERVER_IP" ]; then read -r -p "请输入解锁机公网 IP: " SERVER_IP; fi
   printf '%s\n' "$SERVER_IP"
 }
 
-# ================= 环境安装与配置函数 =================
 install_packages() {
   local packages=("$@")
-  if command_exists apt-get; then
-    apt-get update -y
-    DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
+  if command_exists apt-get; then apt-get update -y; DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
   elif command_exists dnf; then dnf install -y "${packages[@]}"
   elif command_exists yum; then yum install -y "${packages[@]}"
   elif command_exists pacman; then pacman -Sy --noconfirm "${packages[@]}"
@@ -106,29 +81,11 @@ install_packages() {
   else err "未找到可用的包管理器。"; return 1; fi
 }
 
-service_restart() {
-  local svc="$1"
-  if command_exists systemctl; then systemctl restart "$svc"
-  elif command_exists service; then service "$svc" restart; fi
-}
-
-service_enable() {
-  local svc="$1"
-  if command_exists systemctl; then systemctl enable "$svc" >/dev/null 2>&1; fi
-}
-
-service_start() {
-  local svc="$1"
-  if command_exists systemctl; then systemctl start "$svc"
-  elif command_exists service; then service "$svc" start; fi
-}
-
-service_status() {
-  local svc="$1"
-  if command_exists systemctl; then
-    systemctl is-active "$svc" >/dev/null 2>&1 && echo "active" || echo "inactive"
-  else echo "unknown"; fi
-}
+service_restart() { local svc="$1"; if command_exists systemctl; then systemctl restart "$svc"; elif command_exists service; then service "$svc" restart; fi; }
+service_enable() { local svc="$1"; if command_exists systemctl; then systemctl enable "$svc" >/dev/null 2>&1; fi; }
+service_start() { local svc="$1"; if command_exists systemctl; then systemctl start "$svc"; elif command_exists service; then service "$svc" start; fi; }
+service_stop() { local svc="$1"; if command_exists systemctl; then systemctl stop "$svc" >/dev/null 2>&1 || true; elif command_exists service; then service "$svc" stop >/dev/null 2>&1 || true; fi; }
+service_status() { local svc="$1"; if command_exists systemctl; then systemctl is-active "$svc" >/dev/null 2>&1 && echo "active" || echo "inactive"; else echo "unknown"; fi; }
 
 # ================= 防火墙管理核心 =================
 firewall_detect_backend() {
@@ -149,14 +106,8 @@ firewall_init_backend() {
   FIREWALL_BACKEND="$(firewall_detect_backend)"
   if [ "$FIREWALL_BACKEND" = "nftables" ]; then
     if ! nft list table inet ai_unlock >/dev/null 2>&1; then nft add table inet ai_unlock; fi
-    if nft list chain inet ai_unlock input >/dev/null 2>&1; then
-      nft flush chain inet ai_unlock input
-    else
-      nft add chain inet ai_unlock input '{ type filter hook input priority 0; policy accept; }'
-    fi
-    if ! nft list set inet ai_unlock node_whitelist >/dev/null 2>&1; then
-      nft add set inet ai_unlock node_whitelist '{ type ipv4_addr; flags interval; }'
-    fi
+    if nft list chain inet ai_unlock input >/dev/null 2>&1; then nft flush chain inet ai_unlock input; else nft add chain inet ai_unlock input '{ type filter hook input priority 0; policy accept; }'; fi
+    if ! nft list set inet ai_unlock node_whitelist >/dev/null 2>&1; then nft add set inet ai_unlock node_whitelist '{ type ipv4_addr; flags interval; }'; fi
     nft add rule inet ai_unlock input ip protocol udp udp dport 53 ip saddr @node_whitelist accept
     nft add rule inet ai_unlock input ip protocol tcp tcp dport 53 ip saddr @node_whitelist accept
     nft add rule inet ai_unlock input ip protocol udp udp dport 53 drop
@@ -189,9 +140,7 @@ load_node_whitelist() {
 save_node_whitelist() {
   : > "$NODE_WHITELIST_FILE"
   local ip
-  for ip in "${NODE_WHITELIST_IPS[@]}"; do
-    printf '%s\n' "$ip" >> "$NODE_WHITELIST_FILE"
-  done
+  for ip in "${NODE_WHITELIST_IPS[@]}"; do printf '%s\n' "$ip" >> "$NODE_WHITELIST_FILE"; done
 }
 
 sync_firewall_whitelist() {
@@ -231,10 +180,7 @@ FIREWALL_CHAIN="AI_UNLOCK_DNS"
 if command -v nft >/dev/null 2>&1 && nft list table inet ai_unlock >/dev/null 2>&1; then
   nft flush set inet ai_unlock node_whitelist 2>/dev/null || true
   [ -f "$NODE_WHITELIST_FILE" ] || exit 0
-  while IFS= read -r ip; do
-    [[ -z "$ip" || "$ip" == \#* ]] && continue
-    nft add element inet ai_unlock node_whitelist "{ $ip }" 2>/dev/null || true
-  done < "$NODE_WHITELIST_FILE"
+  while IFS= read -r ip; do [[ -z "$ip" || "$ip" == \#* ]] && continue; nft add element inet ai_unlock node_whitelist "{ $ip }" 2>/dev/null || true; done < "$NODE_WHITELIST_FILE"
 elif command -v iptables >/dev/null 2>&1 && iptables -nL "$FIREWALL_CHAIN" >/dev/null 2>&1; then
   iptables -F "$FIREWALL_CHAIN" 2>/dev/null || true
   [ -f "$NODE_WHITELIST_FILE" ] || exit 0
@@ -243,8 +189,7 @@ elif command -v iptables >/dev/null 2>&1 && iptables -nL "$FIREWALL_CHAIN" >/dev
     iptables -A "$FIREWALL_CHAIN" -p udp --dport 53 -s "$ip" -j ACCEPT 2>/dev/null || true
     iptables -A "$FIREWALL_CHAIN" -p tcp --dport 53 -s "$ip" -j ACCEPT 2>/dev/null || true
   done < "$NODE_WHITELIST_FILE"
-  iptables -A "$FIREWALL_CHAIN" -p udp --dport 53 -j DROP 2>/dev/null || true
-  iptables -A "$FIREWALL_CHAIN" -p tcp --dport 53 -j DROP 2>/dev/null || true
+  iptables -A "$FIREWALL_CHAIN" -p udp --dport 53 -j DROP 2>/dev/null || true; iptables -A "$FIREWALL_CHAIN" -p tcp --dport 53 -j DROP 2>/dev/null || true
 fi
 EOF
   chmod +x "$SYNC_SCRIPT"
@@ -274,8 +219,8 @@ remove_firewall_rules() {
   if [ "$FIREWALL_BACKEND" = "nftables" ]; then
     nft delete table inet ai_unlock 2>/dev/null || true
   elif [ "$FIREWALL_BACKEND" = "iptables" ]; then
-    iptables -D INPUT -p udp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null || true
-    iptables -D INPUT -p tcp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null || true
+    while iptables -D INPUT -p udp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null; do :; done
+    while iptables -D INPUT -p tcp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null; do :; done
     iptables -F "$FIREWALL_CHAIN" 2>/dev/null || true
     iptables -X "$FIREWALL_CHAIN" 2>/dev/null || true
   fi
@@ -286,9 +231,7 @@ list_firewall_whitelist() {
   load_node_whitelist
   printf "防火墙后端: %s\n" "$FIREWALL_BACKEND"
   printf "白名单文件: %s\n" "$NODE_WHITELIST_FILE"
-  if [ "${#NODE_WHITELIST_IPS[@]}" -eq 0 ]; then
-    printf "  暂无节点 IP\n"
-  else
+  if [ "${#NODE_WHITELIST_IPS[@]}" -eq 0 ]; then printf "  暂无节点 IP\n"; else
     for ip in "${NODE_WHITELIST_IPS[@]}"; do printf "  %s\n" "$ip"; done
   fi
 }
@@ -297,9 +240,7 @@ firewall_add_ip() {
   read -r -p "请输入要放行的节点 IP: " ip
   if ! validate_ipv4 "$ip"; then warn "IP 格式不正确。"; return; fi
   load_node_whitelist
-  for item in "${NODE_WHITELIST_IPS[@]}"; do
-    if [ "$item" = "$ip" ]; then warn "该 IP 已存在。"; return; fi
-  done
+  for item in "${NODE_WHITELIST_IPS[@]}"; do if [ "$item" = "$ip" ]; then warn "该 IP 已存在。"; return; fi; done
   NODE_WHITELIST_IPS+=("$ip")
   save_node_whitelist
   sync_firewall_whitelist
@@ -313,13 +254,8 @@ firewall_add_batch() {
   for ip in $list; do
     validate_ipv4 "$ip" || continue
     exists=0
-    for item in "${NODE_WHITELIST_IPS[@]}"; do
-      if [ "$item" = "$ip" ]; then exists=1; break; fi
-    done
-    if [ "$exists" -eq 0 ]; then
-      NODE_WHITELIST_IPS+=("$ip")
-      ok "已加入 $ip"
-    fi
+    for item in "${NODE_WHITELIST_IPS[@]}"; do if [ "$item" = "$ip" ]; then exists=1; break; fi; done
+    if [ "$exists" -eq 0 ]; then NODE_WHITELIST_IPS+=("$ip"); ok "已加入 $ip"; fi
   done
   save_node_whitelist
   sync_firewall_whitelist
@@ -328,18 +264,26 @@ firewall_add_batch() {
 firewall_delete_rule() {
   load_node_whitelist
   if [ "${#NODE_WHITELIST_IPS[@]}" -eq 0 ]; then warn "当前没有白名单。"; return; fi
-  list_firewall_whitelist
-  read -r -p "请输入要删除的节点 IP: " ip
-  if ! validate_ipv4 "$ip"; then warn "IP 格式不正确。"; return; fi
-  local next=() removed=0
-  for item in "${NODE_WHITELIST_IPS[@]}"; do
-    if [ "$item" = "$ip" ]; then removed=1; continue; fi
-    next+=("$item")
+  echo "请选择要删除的节点 IP 序号:"
+  local i=1
+  for ip in "${NODE_WHITELIST_IPS[@]}"; do
+    printf "  [%b] %s\n" "$(color 33 "$i")" "$ip"
+    i=$((i + 1))
   done
-  if [ "$removed" -eq 0 ]; then warn "未找到该 IP。"; return; fi
-  NODE_WHITELIST_IPS=("${next[@]}")
-  save_node_whitelist
-  sync_firewall_whitelist
+  read -r -p "请输入序号: " idx
+  if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le "${#NODE_WHITELIST_IPS[@]}" ]; then
+    local del_ip="${NODE_WHITELIST_IPS[$((idx - 1))]}"
+    local next=()
+    for ip in "${NODE_WHITELIST_IPS[@]}"; do
+      if [ "$ip" != "$del_ip" ]; then next+=("$ip"); fi
+    done
+    NODE_WHITELIST_IPS=("${next[@]}")
+    save_node_whitelist
+    sync_firewall_whitelist
+    ok "已成功删除: $del_ip"
+  else
+    warn "输入序号无效。"
+  fi
 }
 
 firewall_clear() {
@@ -352,42 +296,43 @@ firewall_clear() {
 }
 
 validate_ipv4() {
-  local ip="$1"
-  local a b c d extra
+  local ip="$1" a b c d extra
   IFS=. read -r a b c d extra <<EOF
 $ip
 EOF
   [ -n "$a" ] && [ -n "$b" ] && [ -n "$c" ] && [ -n "$d" ] && [ -z "$extra" ] || return 1
-  for octet in "$a" "$b" "$c" "$d"; do
-    case "$octet" in ''|*[!0-9]*) return 1 ;; esac
-    [ "$octet" -ge 0 ] 2>/dev/null && [ "$octet" -le 255 ] 2>/dev/null || return 1
-  done
+  for octet in "$a" "$b" "$c" "$d"; do case "$octet" in ''|*[!0-9]*) return 1 ;; esac; [ "$octet" -ge 0 ] 2>/dev/null && [ "$octet" -le 255 ] 2>/dev/null || return 1; done
   return 0
 }
 
 # ================= DNS与解析辅助函数 =================
+write_public_resolv_conf() {
+  chattr -i /etc/resolv.conf 2>/dev/null || true
+  rm -f /etc/resolv.conf
+  for dns in "${PUBLIC_DNS_SERVERS[@]}"; do printf 'nameserver %s\n' "$dns" >> /etc/resolv.conf; done
+}
+
 backup_resolv_conf() {
   ensure_base_dir
-  if [ ! -f "$RESOLV_BACKUP" ]; then
-    cp -a /etc/resolv.conf "$RESOLV_BACKUP" 2>/dev/null || true
-  fi
+  if [ ! -f "$RESOLV_BACKUP" ]; then cp -a /etc/resolv.conf "$RESOLV_BACKUP" 2>/dev/null || true; fi
 }
 
 restore_resolv_conf() {
   if [ -f "$RESOLV_BACKUP" ]; then
     chattr -i /etc/resolv.conf 2>/dev/null || true
     cp -f "$RESOLV_BACKUP" /etc/resolv.conf
-    ok "已恢复本机 DNS。"
+    chattr +i /etc/resolv.conf 2>/dev/null || true
+    ok "已恢复本机 DNS 备份。"
   else
-    warn "未找到备份文件。"
+    warn "未找到备份文件，已强制恢复为默认公共 DNS (8.8.8.8 / 1.1.1.1)。"
+    write_public_resolv_conf
+    ok "本机 DNS 已重置为公共 DNS。"
   fi
 }
 
 backup_unlock_resolv_conf() {
   ensure_base_dir
-  if [ ! -f "$UNLOCK_RESOLV_BACKUP" ]; then
-    cp -a /etc/resolv.conf "$UNLOCK_RESOLV_BACKUP" 2>/dev/null || true
-  fi
+  if [ ! -f "$UNLOCK_RESOLV_BACKUP" ]; then cp -a /etc/resolv.conf "$UNLOCK_RESOLV_BACKUP" 2>/dev/null || true; fi
 }
 
 restore_unlock_resolv_conf() {
@@ -395,20 +340,12 @@ restore_unlock_resolv_conf() {
     chattr -i /etc/resolv.conf 2>/dev/null || true
     cp -a "$UNLOCK_RESOLV_BACKUP" /etc/resolv.conf 2>/dev/null || true
     ok "已恢复解锁机本地 DNS。"
+  else
+    write_public_resolv_conf
   fi
 }
 
-write_public_resolv_conf() {
-  chattr -i /etc/resolv.conf 2>/dev/null || true
-  rm -f /etc/resolv.conf
-  for dns in "${PUBLIC_DNS_SERVERS[@]}"; do
-    printf 'nameserver %s\n' "$dns" >> /etc/resolv.conf
-  done
-}
-
-port_53_is_busy() {
-  command_exists ss && ss -luntp 2>/dev/null | grep -E ':53[[:space:]]' >/dev/null 2>&1
-}
+port_53_is_busy() { command_exists ss && ss -luntp 2>/dev/null | grep -E ':53[[:space:]]' >/dev/null 2>&1; }
 
 release_port_53() {
   if command_exists systemctl && systemctl is-active systemd-resolved >/dev/null 2>&1; then
@@ -425,13 +362,9 @@ release_port_53() {
 
 # ================= 连通性测试与总结 =================
 check_ai_endpoint() {
-  local url="$1"
-  local code
+  local url="$1" code
   code="$(curl -k -sS -L --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)"
-  if [ -n "$code" ] && [ "$code" != "000" ]; then
-    printf "  [OK]   %s -> HTTP %s\n" "$url" "$code"
-    return 0
-  fi
+  if [ -n "$code" ] && [ "$code" != "000" ]; then printf "  [OK]   %s -> HTTP %s\n" "$url" "$code"; return 0; fi
   printf "  [FAIL] %s\n" "$url"
   return 1
 }
@@ -439,11 +372,7 @@ check_ai_endpoint() {
 show_port_53_listeners() {
   printf "53 端口监听：\n"
   if ! command_exists ss; then printf "  ss 不可用，无法检查。\n"; return; fi
-  if port_53_is_busy; then
-    ss -luntp 2>/dev/null | awk 'NR==1 || /:53[[:space:]]/'
-  else
-    printf "  未发现占用。\n"
-  fi
+  if port_53_is_busy; then ss -luntp 2>/dev/null | awk 'NR==1 || /:53[[:space:]]/'; else printf "  未发现占用。\n"; fi
 }
 
 show_systemd_resolved_status() {
@@ -451,9 +380,7 @@ show_systemd_resolved_status() {
   if command_exists systemctl; then
     printf "  active: %s\n" "$(systemctl is-active systemd-resolved 2>/dev/null || echo unknown)"
     printf "  enabled: %s\n" "$(systemctl is-enabled systemd-resolved 2>/dev/null || echo unknown)"
-  else
-    printf "  systemctl 不可用。\n"
-  fi
+  else printf "  systemctl 不可用。\n"; fi
 }
 
 show_unlock_service_status() {
@@ -469,11 +396,9 @@ show_unlock_config_status() {
 }
 
 show_ai_connectivity() {
-  printf "AI 连通性测试 (仅检测本机访问能力)：\n"
+  printf "AI 主流域名穿透连通性测试：\n"
   local url ok_count=0
-  for url in "${AI_CHECK_URLS[@]}"; do
-    if check_ai_endpoint "$url"; then ok_count=$((ok_count + 1)); fi
-  done
+  for url in "${AI_CHECK_URLS[@]}"; do if check_ai_endpoint "$url"; then ok_count=$((ok_count + 1)); fi; done
   printf "  通过项: %s/%s\n" "$ok_count" "${#AI_CHECK_URLS[@]}"
 }
 
@@ -504,15 +429,10 @@ is_unlock_installed() {
 confirm_reinstall_requested() {
   if ! is_unlock_installed; then return 0; fi
   read -r -p "检测到已存在配置文件，是否覆盖重新安装？(y/N): " confirm
-  case "$confirm" in
-    y|Y) return 0 ;;
-    *) warn "已取消安装。"; return 1 ;;
-  esac
+  case "$confirm" in y|Y) return 0 ;; *) warn "已取消安装。"; return 1 ;; esac
 }
 
-sanitize_domain() {
-  printf '%s' "$1" | sed -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' -e 's#^\\*\\.##' -e 's#/.*##' -e 's/:.*//'
-}
+sanitize_domain() { printf '%s' "$1" | sed -e 's#^[a-zA-Z][a-zA-Z0-9+.-]*://##' -e 's#^\\*\\.##' -e 's#/.*##' -e 's/:.*//'; }
 
 write_custom_domains() {
   : > "$CUSTOM_DOMAIN_FILE"
@@ -583,9 +503,7 @@ EOF
 }
 
 install_unlock_core() {
-  # ★★★ 修复1：将安装前检测提到最前面 ★★★
   if ! confirm_reinstall_requested; then return 1; fi
-
   info "正在进行安装前环境检查..."
   backup_unlock_resolv_conf
   release_port_53
@@ -593,12 +511,11 @@ install_unlock_core() {
 
   if port_53_is_busy; then
     err "53 端口仍被占用，无法继续安装。"
-    show_port_53_listeners
-    return 1
+    show_port_53_listeners; return 1
   fi
 
-  info "正在安装基础组件(dnsmasq/sniproxy)..."
-  install_packages dnsmasq sniproxy curl e2fsprogs iproute2 psmisc || return 1
+  info "正在安装基础组件(dnsmasq/sniproxy/dnsutils)..."
+  install_packages dnsmasq sniproxy curl e2fsprogs iproute2 psmisc dnsutils || return 1
   install_firewall_tools || warn "未检测到 nftables/iptables，节点白名单功能将不可用。"
   
   firewall_init_backend || warn "未检测到可用防火墙后端。"
@@ -614,20 +531,34 @@ install_unlock_core() {
 }
 
 uninstall_unlock_core() {
-  read -r -p "确认卸载并删除所有配置？(y/n): " confirm
+  read -r -p "确认卸载并彻底删除所有配置？(y/n): " confirm
   if [ "$confirm" = "y" ]; then
+    info "正在停止并清理服务..."
     if command_exists systemctl; then
       systemctl disable ai-unlock-firewall.service 2>/dev/null || true
       systemctl stop ai-unlock-firewall.service 2>/dev/null || true
       rm -f "$SYSTEMD_SERVICE"
       systemctl daemon-reload 2>/dev/null || true
     fi
-    rm -f "$SYNC_SCRIPT" "$DNSMASQ_CONF" "$SNI_CONF"
+    
+    info "正在彻底清理防火墙规则..."
     remove_firewall_rules
+    
+    info "正在恢复本机原生 DNS..."
     restore_unlock_resolv_conf
-    service_restart dnsmasq 2>/dev/null
-    service_restart sniproxy 2>/dev/null
-    ok "已清理全部配置，恢复原始状态。"
+    if command_exists systemctl; then
+      systemctl enable systemd-resolved 2>/dev/null || true
+      systemctl start systemd-resolved 2>/dev/null || true
+    fi
+
+    info "正在移除配置文件 (挫骨扬灰)..."
+    rm -rf "$BASE_DIR"
+    rm -f "$DNSMASQ_CONF" "$SNI_CONF"
+    
+    service_stop dnsmasq
+    service_stop sniproxy
+    
+    ok "已清理全部配置，恢复原生状态！"
   fi
 }
 
@@ -640,8 +571,8 @@ domain_menu() {
     printf "%b\n" "$(color 36 "======================================")"
     printf "  %b 查看当前域名池\n" "$(color 32 "1.")"
     printf "  %b 添加自定义域名\n" "$(color 32 "2.")"
-    printf "  %b 删除自定义域名\n" "$(color 32 "3.")"
-    printf "  %b 清空自定义域名\n" "$(color 32 "4.")"
+    printf "  %b 删除自定义域名 (按序号)\n" "$(color 32 "3.")"
+    printf "  %b 清空所有自定义域名\n" "$(color 32 "4.")"
     printf "  %b 恢复默认域名池\n" "$(color 32 "5.")"
     printf "  %b 返回\n" "$(color 32 "0.")"
     printf "%b\n" "$(color 36 "======================================")"
@@ -649,7 +580,20 @@ domain_menu() {
     case "$choice" in
       1) load_custom_domains; printf "\n%b\n" "$(color 36 "默认池")"; printf ' %s\n' "${BASE_DOMAINS[@]}"; printf "\n%b\n" "$(color 36 "自定义池")"; if [ "${#CUSTOM_DOMAINS[@]}" -eq 0 ]; then echo " 暂无"; else printf ' %s\n' "${CUSTOM_DOMAINS[@]}"; fi; pause ;;
       2) read -r -p "要添加的域名: " d; d="$(sanitize_domain "$d")"; if [ -n "$d" ]; then load_custom_domains; CUSTOM_DOMAINS+=("$d"); write_custom_domains; ok "已添加 $d"; fi; pause ;;
-      3) read -r -p "要删除的域名: " d; d="$(sanitize_domain "$d")"; load_custom_domains; local nx=() rm=0; for i in "${CUSTOM_DOMAINS[@]}"; do if [ "$i" = "$d" ]; then rm=1; else nx+=("$i"); fi; done; if [ "$rm" -eq 1 ]; then CUSTOM_DOMAINS=("${nx[@]}"); write_custom_domains; ok "已删除"; else warn "未找到"; fi; pause ;;
+      3) 
+         load_custom_domains
+         if [ "${#CUSTOM_DOMAINS[@]}" -eq 0 ]; then warn "当前无自定义域名。"; pause; continue; fi
+         echo "请选择要删除的域名序号:"
+         local i=1
+         for d in "${CUSTOM_DOMAINS[@]}"; do printf "  [%b] %s\n" "$(color 33 "$i")" "$d"; i=$((i + 1)); done
+         read -r -p "请输入序号: " idx
+         if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le "${#CUSTOM_DOMAINS[@]}" ]; then
+           local del_d="${CUSTOM_DOMAINS[$((idx - 1))]}"
+           local nx=()
+           for d in "${CUSTOM_DOMAINS[@]}"; do if [ "$d" != "$del_d" ]; then nx+=("$d"); fi; done
+           CUSTOM_DOMAINS=("${nx[@]}"); write_custom_domains; ok "已成功删除: $del_d"
+         else warn "输入序号无效。"; fi
+         pause ;;
       4) CUSTOM_DOMAINS=(); write_custom_domains; ok "已清空自定义域名"; pause ;;
       5) : > "$CUSTOM_DOMAIN_FILE"; ok "已恢复默认"; pause ;;
       0) return ;;
@@ -667,7 +611,7 @@ firewall_menu() {
     printf "  %b 查看当前白名单\n" "$(color 32 "1.")"
     printf "  %b 添加单个节点 IP\n" "$(color 32 "2.")"
     printf "  %b 批量添加节点 IP (逗号或空格分隔)\n" "$(color 32 "3.")"
-    printf "  %b 移除单个节点 IP\n" "$(color 32 "4.")"
+    printf "  %b 移除单个节点 IP (按序号)\n" "$(color 32 "4.")"
     printf "  %b 清空所有节点白名单\n" "$(color 32 "5.")"
     printf "  %b 返回\n" "$(color 32 "0.")"
     printf "%b\n" "$(color 36 "======================================")"
@@ -690,46 +634,70 @@ set_node_dns() {
   if [ -z "$unlock_ip" ]; then warn "IP 不能为空。"; return; fi
   backup_resolv_conf
   chattr -i /etc/resolv.conf 2>/dev/null || true
+  
+  # ★★★ 修复2：只保留解锁机 IP，绝对禁止备用公共 DNS 防止偷跑泄漏 ★★★
   {
     printf 'nameserver %s\n' "$unlock_ip"
-    printf 'nameserver 1.1.1.1\n'
-    printf 'nameserver 8.8.8.8\n'
   } > /etc/resolv.conf
   chattr +i /etc/resolv.conf 2>/dev/null || true
-  ok "本机系统 DNS 已指向解锁机: $unlock_ip"
+  ok "本机系统 DNS 已严格指向解锁机: $unlock_ip"
+  info "已屏蔽备用公共 DNS，防止系统底层偷跑产生 DNS Leak。"
 }
 
 test_node_dns() {
-  info "正在检测 DNS 解析..."
-  local domain="chatgpt.com"
-  local resolved=""
-  if command_exists getent; then
-    resolved="$(getent ahostsv4 "$domain" | awk 'NR==1 {print $1}')"
+  # ★★★ 修复3：循环跑遍核心 AI 域名测试 ★★★
+  local configured_dns
+  configured_dns="$(awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf)"
+  
+  if [ -z "$configured_dns" ]; then
+     warn "本机 /etc/resolv.conf 中没有配置 DNS！"
+     return
   fi
   
-  if [ -n "$resolved" ]; then
-    printf "  解析 %s -> %b\n" "$domain" "$(color 32 "$resolved")"
-    info "提示：如果这里的 IP 是你的【解锁机 IP】，说明 DNS 劫持已生效。"
-  else
-    warn "无法解析 $domain，请检查 DNS 配置或网络连接。"
-  fi
-
+  info "当前系统唯一指定 DNS: $configured_dns"
   echo "--------------------------------------"
-  info "正在通过解锁机进行 AI 连通性穿透测试..."
-  info "(只要返回 HTTP 状态码如 200 / 307 / 403，说明流量已成功被解锁机 SNIProxy 代理)"
-  
-  for url in "https://openai.com" "https://claude.ai" "https://gemini.google.com"; do
-    local code
-    code="$(curl -k -sS -L --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)"
-    if [ -n "$code" ] && [ "$code" != "000" ]; then
-      printf "  %b   %s -> HTTP %s\n" "$(color 32 "[成功]")" "$url" "$code"
+  info "正在检测核心域名分流状态..."
+
+  # 只抽取 4 个代表性的域名进行解析测试，防止刷屏
+  for domain in "chatgpt.com" "claude.ai" "gemini.google.com" "perplexity.ai"; do
+    local resolved=""
+    if command_exists nslookup; then
+       resolved="$(nslookup "$domain" 2>/dev/null | grep -A1 "Name:" | grep "Address:" | awk '{print $2}' | head -n 1)"
+    fi
+    if [ -z "$resolved" ] && command_exists ping; then
+       resolved="$(ping -c 1 -W 1 "$domain" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"
+    fi
+
+    if [ -n "$resolved" ]; then
+      if [ "$resolved" = "$configured_dns" ]; then
+          printf "  %b %s -> %s\n" "$(color 32 "[劫持生效]")" "$domain" "$resolved"
+      else
+          printf "  %b %s -> %s\n" "$(color 31 "[劫持失败]")" "$domain" "$resolved"
+      fi
     else
-      printf "  %b %s -> 无法连接\n" "$(color 31 "[失败]")" "$url"
+      printf "  %b %s -> 无法解析 (请确认 IP 是否加了白名单)\n" "$(color 33 "[解析超时]")" "$domain"
     fi
   done
-  
+
   echo "--------------------------------------"
-  info "最终确认：如果上述测试显示 [成功]，你的节点分流已完全打通！"
+  info "正在通过解锁机进行 AI 主流域名穿透连通性测试..."
+  info "(即使你的 DNS 未劫持成功，这里强制走解锁机验证 SNI 代理死没死)"
+  
+  for url in "${AI_CHECK_URLS[@]}"; do
+    local host code
+    host="$(echo "$url" | awk -F/ '{print $3}')"
+    # 使用 --resolve 强制将 443 流量发给配置的解锁机
+    code="$(curl -k -sS -L --connect-timeout 5 --max-time 10 --resolve "${host}:443:${configured_dns}" -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)"
+    if [ -n "$code" ] && [ "$code" != "000" ]; then
+      printf "  %b   %s -> HTTP %s\n" "$(color 32 "[穿透成功]")" "$url" "$code"
+    else
+      printf "  %b %s -> 阻断或超时\n" "$(color 31 "[穿透失败]")" "$url"
+    fi
+  done
+  echo "--------------------------------------"
+  info "诊断结论："
+  info "1. 如果【劫持失败】且【穿透成功】：说明解锁机没毛病，是你这台节点机的 /etc/resolv.conf 被其他进程强行覆盖了。"
+  info "2. 如果【解析超时】或【穿透失败】：说明你的节点 IP 根本没加入解锁机的白名单，或者解锁机防火墙炸了。"
 }
 
 # ================= 菜单导航 =================
@@ -743,7 +711,7 @@ unlock_menu() {
     printf "  %b 综合状态检测 (检查连通性与服务)\n" "$(color 32 "2.")"
     printf "  %b 域名池管理\n" "$(color 32 "3.")"
     printf "  %b 节点白名单管理 (添加要解锁的节点 IP)\n" "$(color 32 "4.")"
-    printf "  %b 卸载 / 回滚环境\n" "$(color 32 "5.")"
+    printf "  %b 彻底卸载清理环境 (挫骨扬灰)\n" "$(color 32 "5.")"
     printf "  %b 返回主菜单\n" "$(color 32 "0.")"
     printf "%b\n" "$(color 36 "======================================")"
     read -r -p "请选择 [0-5]: " choice
@@ -765,9 +733,9 @@ node_menu() {
     printf "%b\n" "$(color 36 "======================================")"
     printf "%b\n" "$(color 36 "           配置【节点机】")"
     printf "%b\n" "$(color 36 "======================================")"
-    printf "  %b 将本机 DNS 指向解锁机\n" "$(color 32 "1.")"
+    printf "  %b 将本机 DNS 严格指向解锁机\n" "$(color 32 "1.")"
     printf "  %b 恢复本机原始 DNS\n" "$(color 32 "2.")"
-    printf "  %b 测试分流解析与 AI 穿透连通性\n" "$(color 32 "3.")"
+    printf "  %b 节点分流智能诊断与穿透测试\n" "$(color 32 "3.")"
     printf "  %b 查看当前 DNS 配置 (/etc/resolv.conf)\n" "$(color 32 "4.")"
     printf "  %b 返回主菜单\n" "$(color 32 "0.")"
     printf "%b\n" "$(color 36 "======================================")"
@@ -804,7 +772,6 @@ main_menu() {
 }
 
 main() {
-  
   if [ "$1" = "sync-firewall" ]; then ensure_root; sync_firewall_whitelist >/dev/null 2>&1; exit 0; fi
   ensure_root
   ensure_base_dir
