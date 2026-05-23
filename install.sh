@@ -9,6 +9,7 @@ DNSMASQ_CONF="/etc/dnsmasq.d/ai_unlock.conf"
 SNI_CONF="/etc/sniproxy.conf"
 SNI_CONF_DIR="/etc/sniproxy/sniproxy.conf"
 SNI_DEFAULT="/etc/default/sniproxy"
+SNI_SYSTEMD_SERVICE="/etc/systemd/system/sniproxy.service"
 RESOLV_BACKUP="$BASE_DIR/resolv.conf.bak"
 UNLOCK_RESOLV_BACKUP="$BASE_DIR/unlock-resolv.conf.bak"
 FIREWALL_CHAIN="AI_UNLOCK_DNS"
@@ -118,6 +119,28 @@ enable_sniproxy_default() {
   else
     printf 'ENABLED=1\n' > "$SNI_DEFAULT"
   fi
+}
+
+install_sniproxy_systemd_unit() {
+  command_exists systemctl || return 0
+  cat > "$SNI_SYSTEMD_SERVICE" <<EOF
+[Unit]
+Description=HTTPS SNI Proxy
+Documentation=man:sniproxy(8)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/sniproxy -f -c $SNI_CONF
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
 }
 
 validate_sniproxy_config() {
@@ -365,6 +388,7 @@ show_unlock_logs() {
 
 restart_unlock_services() {
   enable_sniproxy_default
+  install_sniproxy_systemd_unit
   service_restart dnsmasq
   validate_sniproxy_config || return 1
   service_start sniproxy
@@ -449,6 +473,7 @@ EOF
   # 重启时会触发前面的强杀逻辑，确保干干净净拉起新进程
   service_restart dnsmasq
   enable_sniproxy_default
+  install_sniproxy_systemd_unit
   validate_sniproxy_config || return 1
   service_start sniproxy
   if [ "$(service_status sniproxy)" != "active" ]; then
@@ -471,6 +496,8 @@ install_unlock_core() {
   install_firewall_tools || true
   firewall_init_backend || warn "未检测到可用防火墙后端。"
 
+  enable_sniproxy_default
+  install_sniproxy_systemd_unit
   service_enable dnsmasq; service_enable sniproxy
   update_rules
   setup_firewall_persistence
@@ -487,6 +514,9 @@ uninstall_unlock_core() {
       systemctl disable ai-unlock-firewall.service 2>/dev/null || true
       systemctl stop ai-unlock-firewall.service 2>/dev/null || true
       rm -f "$SYSTEMD_SERVICE"
+      systemctl disable sniproxy.service 2>/dev/null || true
+      systemctl stop sniproxy.service 2>/dev/null || true
+      rm -f "$SNI_SYSTEMD_SERVICE"
       systemctl daemon-reload 2>/dev/null || true
     fi
     remove_firewall_rules
