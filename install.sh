@@ -206,6 +206,7 @@ firewall_init_backend() {
     if ! nft list table inet ai_unlock >/dev/null 2>&1; then nft add table inet ai_unlock; fi
     if nft list chain inet ai_unlock input >/dev/null 2>&1; then nft flush chain inet ai_unlock input; else nft add chain inet ai_unlock input '{ type filter hook input priority 0; policy accept; }'; fi
     if ! nft list set inet ai_unlock node_whitelist >/dev/null 2>&1; then nft add set inet ai_unlock node_whitelist '{ type ipv4_addr; flags interval; }'; fi
+    nft add rule inet ai_unlock input iifname "lo" accept 2>/dev/null || true
     nft add rule inet ai_unlock input ip protocol udp udp dport 53 ip saddr @node_whitelist accept 2>/dev/null || true
     nft add rule inet ai_unlock input ip protocol tcp tcp dport 53 ip saddr @node_whitelist accept 2>/dev/null || true
     nft add rule inet ai_unlock input ip protocol udp udp dport 53 drop 2>/dev/null || true
@@ -214,6 +215,7 @@ firewall_init_backend() {
   fi
   if [ "$FIREWALL_BACKEND" = "iptables" ]; then
     if ! iptables -nL "$FIREWALL_CHAIN" >/dev/null 2>&1; then iptables -N "$FIREWALL_CHAIN" 2>/dev/null || true; iptables -A "$FIREWALL_CHAIN" -j DROP 2>/dev/null || true; fi
+    iptables -C "$FIREWALL_CHAIN" -i lo -j ACCEPT 2>/dev/null || iptables -I "$FIREWALL_CHAIN" 1 -i lo -j ACCEPT 2>/dev/null || true
     iptables -C INPUT -p udp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null || iptables -I INPUT -p udp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null || true
     iptables -C INPUT -p tcp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null || iptables -I INPUT -p tcp --dport 53 -j "$FIREWALL_CHAIN" 2>/dev/null || true
     return 0
@@ -251,6 +253,7 @@ sync_firewall_whitelist() {
   fi
   if [ "$FIREWALL_BACKEND" = "iptables" ]; then
     iptables -F "$FIREWALL_CHAIN" 2>/dev/null || true
+    iptables -A "$FIREWALL_CHAIN" -i lo -j ACCEPT 2>/dev/null || true
     for ip in "${NODE_WHITELIST_IPS[@]}"; do
       validate_ipv4 "$ip" || continue
       iptables -A "$FIREWALL_CHAIN" -p udp --dport 53 -s "$ip" -j ACCEPT 2>/dev/null || true
@@ -270,11 +273,22 @@ setup_firewall_persistence() {
 NODE_WHITELIST_FILE="/etc/ai_unlock/node_whitelist.conf"
 FIREWALL_CHAIN="AI_UNLOCK_DNS"
 if command -v nft >/dev/null 2>&1 && nft list table inet ai_unlock >/dev/null 2>&1; then
+  if nft list chain inet ai_unlock input >/dev/null 2>&1; then
+    nft flush chain inet ai_unlock input 2>/dev/null || true
+  else
+    nft add chain inet ai_unlock input '{ type filter hook input priority 0; policy accept; }' 2>/dev/null || true
+  fi
   nft flush set inet ai_unlock node_whitelist 2>/dev/null || true
+  nft add rule inet ai_unlock input iifname "lo" accept 2>/dev/null || true
   [ -f "$NODE_WHITELIST_FILE" ] || exit 0
   while IFS= read -r ip; do [[ -z "$ip" || "$ip" == \#* ]] && continue; nft add element inet ai_unlock node_whitelist "{ $ip }" 2>/dev/null || true; done < "$NODE_WHITELIST_FILE"
+  nft add rule inet ai_unlock input ip protocol udp udp dport 53 ip saddr @node_whitelist accept 2>/dev/null || true
+  nft add rule inet ai_unlock input ip protocol tcp tcp dport 53 ip saddr @node_whitelist accept 2>/dev/null || true
+  nft add rule inet ai_unlock input ip protocol udp udp dport 53 drop 2>/dev/null || true
+  nft add rule inet ai_unlock input ip protocol tcp tcp dport 53 drop 2>/dev/null || true
 elif command -v iptables >/dev/null 2>&1 && iptables -nL "$FIREWALL_CHAIN" >/dev/null 2>&1; then
   iptables -F "$FIREWALL_CHAIN" 2>/dev/null || true
+  iptables -A "$FIREWALL_CHAIN" -i lo -j ACCEPT 2>/dev/null || true
   [ -f "$NODE_WHITELIST_FILE" ] || exit 0
   while IFS= read -r ip; do
     [[ -z "$ip" || "$ip" == \#* ]] && continue
@@ -648,8 +662,8 @@ write_public_resolv_conf() {
 backup_resolv_conf() { ensure_base_dir; if [ ! -f "$RESOLV_BACKUP" ]; then cp -a /etc/resolv.conf "$RESOLV_BACKUP" 2>/dev/null || true; fi; }
 restore_resolv_conf() {
   chattr -i /etc/resolv.conf 2>/dev/null || true
-  if [ -f "$RESOLV_BACKUP" ]; then cp -f "$RESOLV_BACKUP" /etc/resolv.conf; ok "已恢复原生 DNS。"
-  else warn "未找到备份，重置为公共 DNS。"; write_public_resolv_conf; fi
+  write_public_resolv_conf
+  ok "已恢复公共 DNS: ${PUBLIC_DNS_SERVERS[*]}"
 }
 
 backup_unlock_resolv_conf() { ensure_base_dir; if [ ! -f "$UNLOCK_RESOLV_BACKUP" ]; then cp -a /etc/resolv.conf "$UNLOCK_RESOLV_BACKUP" 2>/dev/null || true; fi; }
