@@ -342,12 +342,39 @@ EOF
 }
 
 # ================= 连通性测试与环境检查 =================
+http_code_is_unlocked() {
+  local code="$1"
+  case "$code" in
+    2*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+print_ai_http_result() {
+  local prefix="$1" url="$2" code="$3"
+  if [ -z "$code" ] || [ "$code" = "000" ]; then
+    printf "  %b %s -> 连接失败/超时\n" "$(color 31 "[$prefix失败]")" "$url"
+    return 1
+  fi
+  if http_code_is_unlocked "$code"; then
+    printf "  %b %s -> HTTP %s\n" "$(color 32 "[$prefix通过]")" "$url" "$code"
+    return 0
+  fi
+  case "$code" in
+    401) printf "  %b %s -> HTTP %s（可达但需登录/认证，不计入解锁成功）\n" "$(color 33 "[$prefix需认证]")" "$url" "$code" ;;
+    3*) printf "  %b %s -> HTTP %s（跳转未完成，不计入解锁成功）\n" "$(color 33 "[$prefix跳转]")" "$url" "$code" ;;
+    403) printf "  %b %s -> HTTP %s（Forbidden，通常表示地区/IP 被拒，不算解锁）\n" "$(color 31 "[$prefix失败]")" "$url" "$code" ;;
+    451) printf "  %b %s -> HTTP %s（地区/法律限制，不算解锁）\n" "$(color 31 "[$prefix失败]")" "$url" "$code" ;;
+    5*) printf "  %b %s -> HTTP %s（服务端错误，不计入解锁成功）\n" "$(color 31 "[$prefix失败]")" "$url" "$code" ;;
+    *) printf "  %b %s -> HTTP %s（异常状态，不计入解锁成功）\n" "$(color 31 "[$prefix失败]")" "$url" "$code" ;;
+  esac
+  return 1
+}
+
 check_ai_endpoint() {
   local url="$1" code
   code="$(curl -k -sS -L --connect-timeout 5 --max-time 10 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)"
-  if [ -n "$code" ] && [ "$code" != "000" ]; then printf "  [OK]   %s -> HTTP %s\n" "$url" "$code"; return 0; fi
-  printf "  [FAIL] %s\n" "$url"
-  return 1
+  print_ai_http_result "AI" "$url" "$code"
 }
 
 show_unlock_summary() {
@@ -768,7 +795,12 @@ set_node_dns() {
   read -r -p "输入【解锁机】公网 IP: " unlock_ip
   if [ -z "$unlock_ip" ]; then warn "不能为空。"; return; fi
   backup_resolv_conf
+  if command_exists systemctl && systemctl is-active systemd-resolved >/dev/null 2>&1; then
+    systemctl stop systemd-resolved 2>/dev/null || true
+    systemctl disable systemd-resolved 2>/dev/null || true
+  fi
   chattr -i /etc/resolv.conf 2>/dev/null || true
+  rm -f /etc/resolv.conf
   printf 'nameserver %s\n' "$unlock_ip" > /etc/resolv.conf
   chattr +i /etc/resolv.conf 2>/dev/null || true
   ok "已设置 DNS: $unlock_ip"
@@ -781,37 +813,19 @@ test_node_dns() {
   local node_public_ip="$(detect_node_public_ip)"
   
   info "当前设定 DNS: $configured_dns"
+  echo "--------------------------------------"
+  info "系统 DNS 配置:"
+  ls -l /etc/resolv.conf 2>/dev/null || true
+  cat /etc/resolv.conf 2>/dev/null || true
+  if command_exists resolvectl; then
+    resolvectl status 2>/dev/null | sed -n '1,35p' || true
+  fi
   if [ -n "$node_public_ip" ]; then
     info "当前节点公网 IP: $node_public_ip（解锁机白名单必须添加这个 IP）"
   else
     warn "未能自动获取节点公网 IP；请手动确认解锁机白名单里添加的是节点公网 IP。"
   fi
   info "将直接向 $configured_dns 发起 DNS 查询，避免被系统备用 DNS 干扰。"
-  echo "--------------------------------------"
-  info "DNS 端口连通性:"
-  if command_exists nc; then
-    if nc -z -w 3 "$configured_dns" 53 >/dev/null 2>&1; then
-      printf "  %b TCP 53 -> 可连接\n" "$(color 32 "[成功]")"
-    else
-      printf "  %b TCP 53 -> 不通\n" "$(color 31 "[失败]")"
-    fi
-  else
-    printf "  %b 未安装 nc，跳过 TCP 53 快速检测\n" "$(color 33 "[跳过]")"
-  fi
-  if command_exists dig; then
-    if dig @"$configured_dns" example.com +time=3 +tries=1 +short >/dev/null 2>&1; then
-      printf "  %b UDP 53 -> 可查询\n" "$(color 32 "[成功]")"
-    else
-      printf "  %b UDP 53 -> 超时或被拦截\n" "$(color 31 "[失败]")"
-    fi
-    if dig +tcp @"$configured_dns" example.com +time=3 +tries=1 +short >/dev/null 2>&1; then
-      printf "  %b TCP DNS -> 可查询\n" "$(color 32 "[成功]")"
-    else
-      printf "  %b TCP DNS -> 超时或被拦截\n" "$(color 31 "[失败]")"
-    fi
-  else
-    printf "  %b 未安装 dig，跳过 UDP/TCP DNS 查询检测\n" "$(color 33 "[跳过]")"
-  fi
   echo "--------------------------------------"
   info "分流解析状态:"
 
@@ -832,13 +846,20 @@ test_node_dns() {
   fi
 
   echo "--------------------------------------"
-  info "普通域名转发测试:"
-  local normal_domain="example.com" normal_resolved=""
-  if command_exists nslookup; then normal_resolved="$(nslookup "$normal_domain" "$configured_dns" 2>/dev/null | awk '/^Address: / {print $2}' | tail -n 1)"; fi
-  if [ -n "$normal_resolved" ]; then
-    printf "  %b %s -> %s\n" "$(color 32 "[成功]")" "$normal_domain" "$normal_resolved"
+  info "系统解析测试:"
+  if command_exists getent; then
+    if getent hosts example.com >/tmp/ai_unlock_getent_example.log 2>/dev/null; then
+      printf "  %b getent example.com -> %s\n" "$(color 32 "[成功]")" "$(head -n 1 /tmp/ai_unlock_getent_example.log)"
+    else
+      printf "  %b getent example.com -> 失败\n" "$(color 31 "[失败]")"
+    fi
+    if getent hosts chatgpt.com >/tmp/ai_unlock_getent_chatgpt.log 2>/dev/null; then
+      printf "  %b getent chatgpt.com -> %s\n" "$(color 32 "[成功]")" "$(head -n 1 /tmp/ai_unlock_getent_chatgpt.log)"
+    else
+      printf "  %b getent chatgpt.com -> 失败\n" "$(color 31 "[失败]")"
+    fi
   else
-    printf "  %b %s -> 超时或失败\n" "$(color 31 "[失败]")" "$normal_domain"
+    printf "  %b 未安装 getent，跳过系统解析测试\n" "$(color 33 "[跳过]")"
   fi
 
   echo "--------------------------------------"
@@ -848,8 +869,7 @@ test_node_dns() {
     local host code
     host="$(echo "$url" | awk -F/ '{print $3}')"
     code="$(curl -k -sS -L --connect-timeout 5 --max-time 10 --resolve "${host}:443:${configured_dns}" -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || true)"
-    if [ -n "$code" ] && [ "$code" != "000" ]; then printf "  %b %s -> HTTP %s\n" "$(color 32 "[通畅]")" "$url" "$code"
-    else printf "  %b %s -> 阻断或超时\n" "$(color 31 "[阻断]")" "$url"; fi
+    print_ai_http_result "解锁" "$url" "$code"
   done
 }
 
