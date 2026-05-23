@@ -70,6 +70,15 @@ detect_public_ip() {
   printf '%s\n' "$SERVER_IP"
 }
 
+detect_node_public_ip() {
+  local ip=""
+  if command_exists curl; then
+    ip="$(curl -k -fs4 --max-time 5 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | awk -F= '/^ip=/ {print $2; exit}')"
+    if [ -z "$ip" ]; then ip="$(curl -fs4 --max-time 5 https://ifconfig.me 2>/dev/null || true)"; fi
+  fi
+  printf '%s\n' "$ip"
+}
+
 install_packages() {
   local packages=("$@")
   if command_exists apt-get; then apt-get update -y; DEBIAN_FRONTEND=noninteractive apt-get install -y "${packages[@]}"
@@ -687,9 +696,40 @@ set_node_dns() {
 test_node_dns() {
   local configured_dns="$(awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf)"
   if [ -z "$configured_dns" ]; then warn "未配置 DNS！"; return; fi
+  local node_public_ip="$(detect_node_public_ip)"
   
   info "当前设定 DNS: $configured_dns"
+  if [ -n "$node_public_ip" ]; then
+    info "当前节点公网 IP: $node_public_ip（解锁机白名单必须添加这个 IP）"
+  else
+    warn "未能自动获取节点公网 IP；请手动确认解锁机白名单里添加的是节点公网 IP。"
+  fi
   info "将直接向 $configured_dns 发起 DNS 查询，避免被系统备用 DNS 干扰。"
+  echo "--------------------------------------"
+  info "DNS 端口连通性:"
+  if command_exists nc; then
+    if nc -z -w 3 "$configured_dns" 53 >/dev/null 2>&1; then
+      printf "  %b TCP 53 -> 可连接\n" "$(color 32 "[成功]")"
+    else
+      printf "  %b TCP 53 -> 不通\n" "$(color 31 "[失败]")"
+    fi
+  else
+    printf "  %b 未安装 nc，跳过 TCP 53 快速检测\n" "$(color 33 "[跳过]")"
+  fi
+  if command_exists dig; then
+    if dig @"$configured_dns" example.com +time=3 +tries=1 +short >/dev/null 2>&1; then
+      printf "  %b UDP 53 -> 可查询\n" "$(color 32 "[成功]")"
+    else
+      printf "  %b UDP 53 -> 超时或被拦截\n" "$(color 31 "[失败]")"
+    fi
+    if dig +tcp @"$configured_dns" example.com +time=3 +tries=1 +short >/dev/null 2>&1; then
+      printf "  %b TCP DNS -> 可查询\n" "$(color 32 "[成功]")"
+    else
+      printf "  %b TCP DNS -> 超时或被拦截\n" "$(color 31 "[失败]")"
+    fi
+  else
+    printf "  %b 未安装 dig，跳过 UDP/TCP DNS 查询检测\n" "$(color 33 "[跳过]")"
+  fi
   echo "--------------------------------------"
   info "分流解析状态:"
 
@@ -706,6 +746,7 @@ test_node_dns() {
   done
   if [ "$dns_ok_count" -eq 0 ]; then
     warn "DNS 查询全部超时：请在解锁机白名单添加【节点机公网 IP】，并在云服务商安全组放行 UDP/TCP 53。"
+    [ -n "$node_public_ip" ] && warn "当前节点公网 IP 是 $node_public_ip，请确认它已经在解锁机白名单中。"
   fi
 
   echo "--------------------------------------"
