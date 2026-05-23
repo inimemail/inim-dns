@@ -24,7 +24,7 @@ AI_CHECK_URLS=(
   "https://mistral.ai"
 )
 
-PUBLIC_DNS_SERVERS=("1.1.1.1" "8.8.8.8")
+PUBLIC_DNS_SERVERS=("8.8.8.8" "1.1.1.1")
 
 OPENAI_DOMAINS=("openai.com" "chatgpt.com" "oaiusercontent.com" "oaistatic.com")
 ANTHROPIC_DOMAINS=("anthropic.com" "claude.ai" "claude.com" "claudeusercontent.com")
@@ -270,7 +270,6 @@ show_unlock_summary() {
   
   if [ "$(service_status sniproxy)" != "active" ]; then
     warn "SNIProxy 未运行！系统可能存在其他进程死锁 443 端口。"
-    info "提示：可在主菜单选择 [1. 安装/更新环境] 触发强制大清场并自动修复。"
   fi
   
   echo "--------------------------------------"
@@ -322,12 +321,14 @@ update_rules() {
 
   {
     cat <<EOF
+user daemon
 pidfile /var/run/sniproxy.pid
 error_log { syslog daemon; priority notice; }
 $listen_block
 table https_hosts {
 EOF
-    while IFS= read -r domain; do [ -z "$domain" ] && continue; escaped="$(escape_regex_domain "$domain")"; printf '    ^%s$ *\n    .*\\.%s$ *\n' "$escaped" "$escaped"; done < <(collect_domains)
+    while IFS= read -r domain; do [ -z "$domain" ] && continue; escaped="$(escape_regex_domain "$domain")"; printf '    ^%s$ *:443\n    .*\\.%s$ *:443\n' "$escaped" "$escaped"; done < <(collect_domains)
+    printf '    .* *:443\n'
     printf '}\n'
   } > "$SNI_CONF"
 
@@ -424,7 +425,7 @@ domain_menu() {
     printf "%b\n" "$(color 36 "======================================")"
     printf "  %b 查看域名池\n" "$(color 32 "1.")"
     printf "  %b 添加自定义域名\n" "$(color 32 "2.")"
-    printf "  %b 删除自定义域名 (按序号)\n" "$(color 32 "3.")"
+    printf "  %b 删除自定义域名\n" "$(color 32 "3.")"
     printf "  %b 清空自定义域名\n" "$(color 32 "4.")"
     printf "  %b 恢复默认配置\n" "$(color 32 "5.")"
     printf "  %b 返回\n" "$(color 32 "0.")"
@@ -466,8 +467,8 @@ firewall_menu() {
     printf "%b\n" "$(color 36 "======================================")"
     printf "  %b 查看白名单\n" "$(color 32 "1.")"
     printf "  %b 添加单个 IP\n" "$(color 32 "2.")"
-    printf "  %b 批量添加 IP (空格或逗号分隔)\n" "$(color 32 "3.")"
-    printf "  %b 删除节点 IP (按序号)\n" "$(color 32 "4.")"
+    printf "  %b 批量添加 IP\n" "$(color 32 "3.")"
+    printf "  %b 删除节点 IP" "$(color 32 "4.")"
     printf "  %b 清空白名单\n" "$(color 32 "5.")"
     printf "  %b 返回\n" "$(color 32 "0.")"
     printf "%b\n" "$(color 36 "======================================")"
@@ -475,7 +476,7 @@ firewall_menu() {
     case "$choice" in
       1) list_firewall_whitelist; echo ""; pause ;;
       2) read -r -p "输入要放行的 IP: " ip; if ! validate_ipv4 "$ip"; then warn "IP 格式错误。"; else load_node_whitelist; local exists=0; for item in "${NODE_WHITELIST_IPS[@]}"; do if [ "$item" = "$ip" ]; then exists=1; break; fi; done; if [ "$exists" -eq 1 ]; then warn "IP 已存在。"; else NODE_WHITELIST_IPS+=("$ip"); save_node_whitelist; sync_firewall_whitelist; fi; fi; pause ;;
-      3) read -r -p "输入多个 IP: " list; list="$(printf '%s' "$list" | tr ',' ' ')"; load_node_whitelist; for ip in $list; do validate_ipv4 "$ip" || continue; local exists=0; for item in "${NODE_WHITELIST_IPS[@]}"; do if [ "$item" = "$ip" ]; then exists=1; break; fi; done; if [ "$exists" -eq 0 ]; then NODE_WHITELIST_IPS+=("$ip"); ok "已加入 $ip"; fi; done; save_node_whitelist; sync_firewall_whitelist; pause ;;
+      3) read -r -p "输入多个 IP(用空格或逗号分隔): " list; list="$(printf '%s' "$list" | tr ',' ' ')"; load_node_whitelist; for ip in $list; do validate_ipv4 "$ip" || continue; local exists=0; for item in "${NODE_WHITELIST_IPS[@]}"; do if [ "$item" = "$ip" ]; then exists=1; break; fi; done; if [ "$exists" -eq 0 ]; then NODE_WHITELIST_IPS+=("$ip"); ok "已加入 $ip"; fi; done; save_node_whitelist; sync_firewall_whitelist; pause ;;
       4) 
          load_node_whitelist
          if [ "${#NODE_WHITELIST_IPS[@]}" -eq 0 ]; then warn "当前没有白名单。"; pause; continue; fi
@@ -499,9 +500,12 @@ set_node_dns() {
   if [ -z "$unlock_ip" ]; then warn "不能为空。"; return; fi
   backup_resolv_conf
   chattr -i /etc/resolv.conf 2>/dev/null || true
-  { printf 'nameserver %s\n' "$unlock_ip"; } > /etc/resolv.conf
+  {
+    printf 'nameserver %s\n' "$unlock_ip"
+    for dns in "${PUBLIC_DNS_SERVERS[@]}"; do printf 'nameserver %s\n' "$dns"; done
+  } > /etc/resolv.conf
   chattr +i /etc/resolv.conf 2>/dev/null || true
-  ok "已指向: $unlock_ip (备用 DNS 已屏蔽)"
+  ok "已设置主 DNS: $unlock_ip，备用 DNS: ${PUBLIC_DNS_SERVERS[*]}"
 }
 
 test_node_dns() {
@@ -541,7 +545,7 @@ unlock_menu() {
     printf "%b\n" "$(color 36 "======================================")"
     printf "%b\n" "$(color 36 "           部署解锁机")"
     printf "%b\n" "$(color 36 "======================================")"
-    printf "  %b 安装/更新环境\n" "$(color 32 "1.")"
+    printf "  %b 安装\n" "$(color 32 "1.")"
     printf "  %b 运行状态检测\n" "$(color 32 "2.")"
     printf "  %b 域名池管理\n" "$(color 32 "3.")"
     printf "  %b 白名单管理\n" "$(color 32 "4.")"
