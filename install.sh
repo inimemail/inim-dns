@@ -353,20 +353,17 @@ http_code_is_unlocked() {
 print_ai_http_result() {
   local prefix="$1" url="$2" code="$3"
   if [ -z "$code" ] || [ "$code" = "000" ]; then
-    printf "  %b %s -> 连接失败/超时\n" "$(color 31 "[$prefix失败]")" "$url"
+    printf "  %b %s\n" "$(color 31 "[$prefix失败]")" "$url"
     return 1
   fi
   if http_code_is_unlocked "$code"; then
-    printf "  %b %s -> 可访问\n" "$(color 32 "[$prefix通过]")" "$url"
+    printf "  %b %s\n" "$(color 32 "[$prefix通过]")" "$url"
     return 0
   fi
   case "$code" in
-    401) printf "  %b %s -> 可达但需登录/认证，不计入解锁成功\n" "$(color 33 "[$prefix需认证]")" "$url" ;;
-    3*) printf "  %b %s -> 跳转未完成，不计入解锁成功\n" "$(color 33 "[$prefix跳转]")" "$url" ;;
-    403) printf "  %b %s -> Forbidden，通常表示地区/IP 被拒，不算解锁\n" "$(color 31 "[$prefix失败]")" "$url" ;;
-    451) printf "  %b %s -> 地区/法律限制，不算解锁\n" "$(color 31 "[$prefix失败]")" "$url" ;;
-    5*) printf "  %b %s -> 服务端错误，不计入解锁成功\n" "$(color 31 "[$prefix失败]")" "$url" ;;
-    *) printf "  %b %s -> 异常状态，不计入解锁成功\n" "$(color 31 "[$prefix失败]")" "$url" ;;
+    401) printf "  %b %s\n" "$(color 33 "[$prefix需认证]")" "$url" ;;
+    3*) printf "  %b %s\n" "$(color 33 "[$prefix跳转]")" "$url" ;;
+    *) printf "  %b %s\n" "$(color 31 "[$prefix失败]")" "$url" ;;
   esac
   return 1
 }
@@ -448,74 +445,6 @@ show_unlock_logs() {
   else
     warn "未检测到 nftables/iptables。"
   fi
-}
-
-diagnose_unlock_dns53() {
-  local public_ip
-  public_ip="$(detect_public_ip)"
-  printf "%b\n" "$(color 36 "======================================")"
-  printf "%b\n" "$(color 36 "          DNS 53 端口排查")"
-  printf "%b\n" "$(color 36 "======================================")"
-  printf "解锁机公网 IP: %s\n" "$public_ip"
-
-  echo "--------------------------------------"
-  printf "dnsmasq 状态: %s\n" "$(service_status dnsmasq)"
-  if command_exists systemctl; then
-    systemctl status dnsmasq --no-pager -l 2>/dev/null | sed -n '1,12p' || true
-  fi
-
-  echo "--------------------------------------"
-  printf "%b\n" "$(color 36 "dnsmasq 配置")"
-  if [ -f "$DNSMASQ_CONF" ]; then
-    sed -n '1,80p' "$DNSMASQ_CONF"
-  else
-    warn "未找到 $DNSMASQ_CONF，请先安装/更新解锁机配置。"
-  fi
-
-  echo "--------------------------------------"
-  printf "%b\n" "$(color 36 "本机监听")"
-  if command_exists ss; then
-    ss -lntup 2>/dev/null | awk 'NR==1 || /:53|:443/'
-  else
-    warn "未安装 ss/iproute2，无法查看端口监听。"
-  fi
-
-  echo "--------------------------------------"
-  printf "%b\n" "$(color 36 "本机 DNS 查询")"
-  if command_exists dig; then
-    printf "  127.0.0.1 example.com: "
-    if dig @127.0.0.1 example.com +time=3 +tries=1 +short 2>/dev/null | head -n 1; then :; else printf "失败\n"; fi
-    printf "  127.0.0.1 chatgpt.com A: "
-    if dig @127.0.0.1 chatgpt.com A +time=3 +tries=1 +short 2>/dev/null | awk '/^[0-9]+\./ {print; exit}'; then :; else printf "失败\n"; fi
-  elif command_exists nslookup; then
-    nslookup example.com 127.0.0.1 2>/dev/null || true
-    nslookup chatgpt.com 127.0.0.1 2>/dev/null || true
-  else
-    warn "未安装 dig/nslookup，无法做本机 DNS 查询。"
-  fi
-
-  echo "--------------------------------------"
-  printf "%b\n" "$(color 36 "节点白名单")"
-  if [ -s "$NODE_WHITELIST_FILE" ]; then
-    cat "$NODE_WHITELIST_FILE"
-  else
-    warn "白名单为空。必须添加【节点机公网 IP】。"
-  fi
-
-  echo "--------------------------------------"
-  printf "%b\n" "$(color 36 "本机防火墙规则")"
-  if command_exists nft && nft list table inet ai_unlock >/dev/null 2>&1; then
-    nft list table inet ai_unlock 2>/dev/null || true
-  elif command_exists iptables; then
-    iptables -nL "$FIREWALL_CHAIN" 2>/dev/null || true
-  else
-    warn "未检测到 nftables/iptables。"
-  fi
-
-  echo "--------------------------------------"
-  warn "如果本机 127.0.0.1 查询成功，但节点机超时，问题就在：白名单 IP、云安全组、或上游机房拦截 53。"
-  info "云服务商入站规则需要放行：UDP 53 和 TCP 53，来源建议填节点机公网 IP。"
-  info "节点机侧验证命令：dig @$public_ip example.com +time=3 +tries=1；dig +tcp @$public_ip example.com +time=3 +tries=1"
 }
 
 restart_unlock_services() {
@@ -859,7 +788,7 @@ test_node_dns() {
   fi
 
   echo "--------------------------------------"
-  info "免 DNS 强制穿透连通性测试:"
+  info "强制走解锁机测试:"
   
   for url in "${AI_CHECK_URLS[@]}"; do
     local host code
@@ -878,25 +807,23 @@ unlock_menu() {
     printf "  %b 安装\n" "$(color 32 "1.")"
     printf "  %b 运行状态检测\n" "$(color 32 "2.")"
     printf "  %b 查看服务日志\n" "$(color 32 "3.")"
-    printf "  %b DNS 53 排查\n" "$(color 32 "4.")"
-    printf "  %b 重启服务\n" "$(color 32 "5.")"
-    printf "  %b 暂停服务\n" "$(color 32 "6.")"
-    printf "  %b 域名池管理\n" "$(color 32 "7.")"
-    printf "  %b 白名单管理\n" "$(color 32 "8.")"
-    printf "  %b 彻底卸载清理\n" "$(color 32 "9.")"
+    printf "  %b 重启服务\n" "$(color 32 "4.")"
+    printf "  %b 暂停服务\n" "$(color 32 "5.")"
+    printf "  %b 域名池管理\n" "$(color 32 "6.")"
+    printf "  %b 白名单管理\n" "$(color 32 "7.")"
+    printf "  %b 彻底卸载清理\n" "$(color 32 "8.")"
     printf "  %b 返回主菜单\n" "$(color 32 "0.")"
     printf "%b\n" "$(color 36 "======================================")"
-    read -r -p "请选择 [0-9]: " choice
+    read -r -p "请选择 [0-8]: " choice
     case "$choice" in
       1) install_unlock_core; pause ;;
       2) show_unlock_summary; pause ;;
       3) show_unlock_logs; pause ;;
-      4) diagnose_unlock_dns53; pause ;;
-      5) restart_unlock_services; pause ;;
-      6) stop_unlock_services; pause ;;
-      7) domain_menu ;;
-      8) firewall_menu ;;
-      9) uninstall_unlock_core; pause ;;
+      4) restart_unlock_services; pause ;;
+      5) stop_unlock_services; pause ;;
+      6) domain_menu ;;
+      7) firewall_menu ;;
+      8) uninstall_unlock_core; pause ;;
       0) return ;;
       *) warn "无效选项"; sleep 1 ;;
     esac
