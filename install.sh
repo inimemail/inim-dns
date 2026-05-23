@@ -650,12 +650,9 @@ set_node_dns() {
   if [ -z "$unlock_ip" ]; then warn "不能为空。"; return; fi
   backup_resolv_conf
   chattr -i /etc/resolv.conf 2>/dev/null || true
-  {
-    printf 'nameserver %s\n' "$unlock_ip"
-    for dns in "${PUBLIC_DNS_SERVERS[@]}"; do printf 'nameserver %s\n' "$dns"; done
-  } > /etc/resolv.conf
+  printf 'nameserver %s\n' "$unlock_ip" > /etc/resolv.conf
   chattr +i /etc/resolv.conf 2>/dev/null || true
-  ok "已设置主 DNS: $unlock_ip，备用 DNS: ${PUBLIC_DNS_SERVERS[*]}"
+  ok "已设置 DNS: $unlock_ip"
 }
 
 test_node_dns() {
@@ -663,19 +660,24 @@ test_node_dns() {
   if [ -z "$configured_dns" ]; then warn "未配置 DNS！"; return; fi
   
   info "当前设定 DNS: $configured_dns"
+  info "将直接向 $configured_dns 发起 DNS 查询，避免被系统备用 DNS 干扰。"
   echo "--------------------------------------"
   info "分流解析状态:"
 
+  local dns_ok_count=0
   for domain in "chatgpt.com" "claude.ai" "gemini.google.com" "perplexity.ai"; do
     local resolved=""
-    if command_exists nslookup; then resolved="$(nslookup "$domain" 2>/dev/null | grep -A1 "Name:" | grep "Address:" | awk '{print $2}' | head -n 1)"; fi
+    if command_exists nslookup; then resolved="$(nslookup "$domain" "$configured_dns" 2>/dev/null | awk '/^Address: / {print $2}' | tail -n 1)"; fi
     if [ -z "$resolved" ] && command_exists ping; then resolved="$(ping -c 1 -W 1 "$domain" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"; fi
 
     if [ -n "$resolved" ]; then
-      if [ "$resolved" = "$configured_dns" ]; then printf "  %b %s -> %s\n" "$(color 32 "[成功]")" "$domain" "$resolved"
+      if [ "$resolved" = "$configured_dns" ]; then dns_ok_count=$((dns_ok_count + 1)); printf "  %b %s -> %s\n" "$(color 32 "[成功]")" "$domain" "$resolved"
       else printf "  %b %s -> %s\n" "$(color 31 "[失败]")" "$domain" "$resolved"; fi
     else printf "  %b %s -> 超时 (请检查白名单/安全组)\n" "$(color 33 "[超时]")" "$domain"; fi
   done
+  if [ "$dns_ok_count" -eq 0 ]; then
+    warn "DNS 查询全部超时：请在解锁机白名单添加【节点机公网 IP】，并在云服务商安全组放行 UDP/TCP 53。"
+  fi
 
   echo "--------------------------------------"
   info "免 DNS 强制穿透连通性测试:"
