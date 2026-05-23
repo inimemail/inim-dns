@@ -357,16 +357,16 @@ print_ai_http_result() {
     return 1
   fi
   if http_code_is_unlocked "$code"; then
-    printf "  %b %s -> HTTP %s\n" "$(color 32 "[$prefix通过]")" "$url" "$code"
+    printf "  %b %s -> 可访问\n" "$(color 32 "[$prefix通过]")" "$url"
     return 0
   fi
   case "$code" in
-    401) printf "  %b %s -> HTTP %s（可达但需登录/认证，不计入解锁成功）\n" "$(color 33 "[$prefix需认证]")" "$url" "$code" ;;
-    3*) printf "  %b %s -> HTTP %s（跳转未完成，不计入解锁成功）\n" "$(color 33 "[$prefix跳转]")" "$url" "$code" ;;
-    403) printf "  %b %s -> HTTP %s（Forbidden，通常表示地区/IP 被拒，不算解锁）\n" "$(color 31 "[$prefix失败]")" "$url" "$code" ;;
-    451) printf "  %b %s -> HTTP %s（地区/法律限制，不算解锁）\n" "$(color 31 "[$prefix失败]")" "$url" "$code" ;;
-    5*) printf "  %b %s -> HTTP %s（服务端错误，不计入解锁成功）\n" "$(color 31 "[$prefix失败]")" "$url" "$code" ;;
-    *) printf "  %b %s -> HTTP %s（异常状态，不计入解锁成功）\n" "$(color 31 "[$prefix失败]")" "$url" "$code" ;;
+    401) printf "  %b %s -> 可达但需登录/认证，不计入解锁成功\n" "$(color 33 "[$prefix需认证]")" "$url" ;;
+    3*) printf "  %b %s -> 跳转未完成，不计入解锁成功\n" "$(color 33 "[$prefix跳转]")" "$url" ;;
+    403) printf "  %b %s -> Forbidden，通常表示地区/IP 被拒，不算解锁\n" "$(color 31 "[$prefix失败]")" "$url" ;;
+    451) printf "  %b %s -> 地区/法律限制，不算解锁\n" "$(color 31 "[$prefix失败]")" "$url" ;;
+    5*) printf "  %b %s -> 服务端错误，不计入解锁成功\n" "$(color 31 "[$prefix失败]")" "$url" ;;
+    *) printf "  %b %s -> 异常状态，不计入解锁成功\n" "$(color 31 "[$prefix失败]")" "$url" ;;
   esac
   return 1
 }
@@ -485,8 +485,8 @@ diagnose_unlock_dns53() {
   if command_exists dig; then
     printf "  127.0.0.1 example.com: "
     if dig @127.0.0.1 example.com +time=3 +tries=1 +short 2>/dev/null | head -n 1; then :; else printf "失败\n"; fi
-    printf "  127.0.0.1 chatgpt.com: "
-    if dig @127.0.0.1 chatgpt.com +time=3 +tries=1 +short 2>/dev/null | head -n 1; then :; else printf "失败\n"; fi
+    printf "  127.0.0.1 chatgpt.com A: "
+    if dig @127.0.0.1 chatgpt.com A +time=3 +tries=1 +short 2>/dev/null | awk '/^[0-9]+\./ {print; exit}'; then :; else printf "失败\n"; fi
   elif command_exists nslookup; then
     nslookup example.com 127.0.0.1 2>/dev/null || true
     nslookup chatgpt.com 127.0.0.1 2>/dev/null || true
@@ -519,16 +519,8 @@ diagnose_unlock_dns53() {
 }
 
 restart_unlock_services() {
-  enable_sniproxy_default
-  install_sniproxy_systemd_unit
-  service_restart dnsmasq
-  validate_sniproxy_config || return 1
-  service_start sniproxy
-  if [ "$(service_status sniproxy)" != "active" ]; then
-    show_sniproxy_failure
-    return 1
-  fi
-  ok "解锁服务已重启。"
+  update_rules || return 1
+  ok "解锁规则已重新生成，服务已重启。"
   printf "  dnsmasq: %s\n" "$(service_status dnsmasq)"
   printf "  sniproxy: %s\n" "$(service_status sniproxy)"
 }
@@ -582,6 +574,7 @@ update_rules() {
     printf 'bogus-priv\n'
     while IFS= read -r domain; do
       [ -z "$domain" ] && continue
+      printf 'local=/%s/\n' "$domain"
       printf 'address=/%s/%s\n' "$domain" "$SERVER_IP"
     done < <(collect_domains)
   } > "$DNSMASQ_CONF"
@@ -829,31 +822,34 @@ test_node_dns() {
   echo "--------------------------------------"
   info "分流解析状态:"
 
-  local dns_ok_count=0
+  local dns_ok_count=0 dns_miss_count=0 dns_timeout_count=0
   for domain in "chatgpt.com" "claude.ai" "gemini.google.com" "perplexity.ai"; do
     local resolved=""
-    if command_exists nslookup; then resolved="$(nslookup "$domain" "$configured_dns" 2>/dev/null | awk '/^Address: / {print $2}' | tail -n 1)"; fi
+    if command_exists dig; then resolved="$(dig @"$configured_dns" "$domain" A +time=3 +tries=1 +short 2>/dev/null | awk '/^[0-9]+\./ {print; exit}')"; fi
+    if [ -z "$resolved" ] && command_exists nslookup; then resolved="$(nslookup -type=A "$domain" "$configured_dns" 2>/dev/null | awk '/^Address: / {print $2}' | grep -E '^[0-9]+\.' | tail -n 1)"; fi
     if [ -z "$resolved" ] && command_exists ping; then resolved="$(ping -c 1 -W 1 "$domain" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)"; fi
 
     if [ -n "$resolved" ]; then
       if [ "$resolved" = "$configured_dns" ]; then dns_ok_count=$((dns_ok_count + 1)); printf "  %b %s -> %s\n" "$(color 32 "[成功]")" "$domain" "$resolved"
-      else printf "  %b %s -> %s\n" "$(color 31 "[失败]")" "$domain" "$resolved"; fi
-    else printf "  %b %s -> 超时 (请检查白名单/安全组)\n" "$(color 33 "[超时]")" "$domain"; fi
+      else dns_miss_count=$((dns_miss_count + 1)); printf "  %b %s -> %s（未命中解锁机）\n" "$(color 31 "[失败]")" "$domain" "$resolved"; fi
+    else dns_timeout_count=$((dns_timeout_count + 1)); printf "  %b %s -> 无 A 记录响应\n" "$(color 33 "[无响应]")" "$domain"; fi
   done
-  if [ "$dns_ok_count" -eq 0 ]; then
-    warn "DNS 查询全部超时：请在解锁机白名单添加【节点机公网 IP】，并在云服务商安全组放行 UDP/TCP 53。"
+  if [ "$dns_ok_count" -eq 0 ] && [ "$dns_timeout_count" -gt 0 ]; then
+    warn "AI 域名 A 记录无响应：请在解锁机白名单添加【节点机公网 IP】，并在云服务商安全组放行 UDP/TCP 53。"
     [ -n "$node_public_ip" ] && warn "当前节点公网 IP 是 $node_public_ip，请确认它已经在解锁机白名单中。"
+  elif [ "$dns_miss_count" -gt 0 ]; then
+    warn "AI 域名没有解析到解锁机：请在解锁机重新生成配置，并确认 dnsmasq 配置里有 local=/域名/ 和 address=/域名/$configured_dns。"
   fi
 
   echo "--------------------------------------"
   info "系统解析测试:"
   if command_exists getent; then
-    if getent hosts example.com >/tmp/ai_unlock_getent_example.log 2>/dev/null; then
+    if getent ahostsv4 example.com >/tmp/ai_unlock_getent_example.log 2>/dev/null; then
       printf "  %b getent example.com -> %s\n" "$(color 32 "[成功]")" "$(head -n 1 /tmp/ai_unlock_getent_example.log)"
     else
       printf "  %b getent example.com -> 失败\n" "$(color 31 "[失败]")"
     fi
-    if getent hosts chatgpt.com >/tmp/ai_unlock_getent_chatgpt.log 2>/dev/null; then
+    if getent ahostsv4 chatgpt.com >/tmp/ai_unlock_getent_chatgpt.log 2>/dev/null; then
       printf "  %b getent chatgpt.com -> %s\n" "$(color 32 "[成功]")" "$(head -n 1 /tmp/ai_unlock_getent_chatgpt.log)"
     else
       printf "  %b getent chatgpt.com -> 失败\n" "$(color 31 "[失败]")"
